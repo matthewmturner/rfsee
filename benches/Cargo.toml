@@ -4,11 +4,29 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+rand = { version = "0.8", features = ["small_rng"] }
+rfsee-tf-idf = { path = "../crates/tf_idf" }
 
 [dev-dependencies]
 criterion = "0.5.1"
-rfsee-tf-idf = { path = "../crates/tf_idf" }
+simd-json = "0.14.3"
 
 [[bench]]
-name = "build_index"
+name = "add_rfc_entry"
+harness = false
+
+[[bench]]
+name = "combine_scores"
+harness = false
+
+[[bench]]
+name = "index_pipeline"
+harness = false
+
+[[bench]]
+name = "index_serde"
+harness = false
+
+[[bench]]
+name = "search_index"
 harness = false
