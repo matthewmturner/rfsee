@@ -102,4 +102,98 @@ fn main() {
     println!("peak_heap_bytes={peak_heap}");
     println!("peak_rss_kib_start={rss_start_kib}");
     println!("peak_rss_kib_end={rss_end_kib}");
+
+    let record = LogRecord {
+        timestamp: unix_timestamp_ms(),
+        git_sha: git_sha(),
+        mode: &mode,
+        docs,
+        index_terms: terms,
+        alloc_count: allocs,
+        peak_heap_bytes: peak_heap,
+        peak_rss_kib: rss_end_kib,
+    };
+    match append_log(&record) {
+        Ok(path) => println!("logged_to={}", path.display()),
+        Err(e) => eprintln!("failed to write memory profile log: {e}"),
+    }
+}
+
+struct LogRecord<'a> {
+    timestamp: u64,
+    git_sha: String,
+    mode: &'a str,
+    docs: usize,
+    index_terms: usize,
+    alloc_count: usize,
+    peak_heap_bytes: usize,
+    peak_rss_kib: u64,
+}
+
+const LOG_HEADER: &str =
+    "timestamp_ms,git_sha,mode,docs,index_terms,alloc_count,peak_heap_bytes,peak_rss_kib";
+
+/// Default log path, anchored to this crate so cwd doesn't matter. Override with
+/// the RFSEE_MEM_LOG env var.
+fn log_path() -> std::path::PathBuf {
+    if let Some(path) = std::env::var_os("RFSEE_MEM_LOG") {
+        path.into()
+    } else {
+        concat!(env!("CARGO_MANIFEST_DIR"), "/memory-profile.csv").into()
+    }
+}
+
+fn append_log(record: &LogRecord) -> std::io::Result<std::path::PathBuf> {
+    use std::io::Write;
+
+    let path = log_path();
+    let needs_header = !path.exists();
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)?;
+    if needs_header {
+        writeln!(file, "{LOG_HEADER}")?;
+    }
+    writeln!(
+        file,
+        "{},{},{},{},{},{},{},{}",
+        record.timestamp,
+        record.git_sha,
+        record.mode,
+        record.docs,
+        record.index_terms,
+        record.alloc_count,
+        record.peak_heap_bytes,
+        record.peak_rss_kib,
+    )?;
+    Ok(path)
+}
+
+fn unix_timestamp_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// Short SHA of HEAD, with a `-dirty` suffix when the working tree has uncommitted
+/// changes so profiling runs mid-fix aren't mistaken for clean-commit numbers.
+fn git_sha() -> String {
+    let sha = std::process::Command::new("git")
+        .args(["rev-parse", "--short", "HEAD"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .map(|s| s.trim().to_string())
+        .unwrap_or_else(|| "unknown".to_string());
+
+    let dirty = std::process::Command::new("git")
+        .args(["status", "--porcelain"])
+        .output()
+        .map(|o| o.status.success() && !o.stdout.is_empty())
+        .unwrap_or(false);
+
+    if dirty { format!("{sha}-dirty") } else { sha }
 }
