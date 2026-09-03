@@ -1,0 +1,2 @@
+timestamp_ms,git_sha,mode,docs,index_terms,alloc_count,peak_heap_bytes,peak_rss_kib
+1788378842823,49a99ea-dirty,buffered,100,17783,510422,13778761,21400

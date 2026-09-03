@@ -29,3 +29,16 @@ build-dev:
 
 time-build-index:
     time cargo r --release --package rfsee -- index
+
+bench:
+    cargo bench -p benches
+
+bench-baseline name="before":
+    cargo bench -p benches -- --save-baseline {{name}}
+
+bench-compare name="before":
+    cargo bench -p benches -- --baseline {{name}}
+
+# Profile pipeline memory: alloc count, peak heap bytes, peak RSS (VmHWM)
+memory-profile mode="buffered":
+    cargo run --release -p benches -- {{mode}}

@@ -5,7 +5,7 @@ local curl     = require("plenary.curl")
 
 local M        = {}
 
-RFC_INDEX_URL  = "https://www.ietf.org/rfc/rfc-index.txt"
+RFC_INDEX_URL  = "https://www.rfc-editor.org/rfc-index.txt"
 RFC_DELIMITTER = "\n\n"
 
 function M.search_terms(terms)
