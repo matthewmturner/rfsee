@@ -11,7 +11,7 @@ use crate::{
     RfcEntry,
 };
 
-const RFC_INDEX_URL: &str = "https://www.ietf.org/rfc/rfc-index.txt";
+const RFC_INDEX_URL: &str = "https://www.rfc-editor.org/rfc-index.txt";
 pub const RFC_EDITOR_URL_BASE: &str = "https://www.rfc-editor.org/rfc/rfc";
 
 pub fn fetch(url: &str) -> RFSeeResult<String> {
@@ -93,8 +93,8 @@ mod tests {
     }
 
     #[test]
-    fn fetch_ietf_path() {
-        let url = "https://www.ietf.org/rfc/rfc-index.txt";
+    fn fetch_rfc_index() {
+        let url = RFC_INDEX_URL;
         let res = fetch(url).unwrap();
         if let Some(first_line) = res.lines().next() {
             assert_eq!(first_line, "HTTP/1.1 200 OK")
