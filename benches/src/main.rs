@@ -42,8 +42,7 @@ unsafe impl GlobalAlloc for CountingAlloc {
         let ptr = System.alloc(layout);
         if !ptr.is_null() {
             self.allocs.fetch_add(1, Ordering::Relaxed);
-            let live = self.live_bytes.fetch_add(layout.size(), Ordering::Relaxed)
-                + layout.size();
+            let live = self.live_bytes.fetch_add(layout.size(), Ordering::Relaxed) + layout.size();
             self.peak_bytes.fetch_max(live, Ordering::Relaxed);
         }
         ptr
@@ -72,7 +71,9 @@ fn peak_rss_kib() -> u64 {
 }
 
 fn main() {
-    let mode = std::env::args().nth(1).unwrap_or_else(|| "buffered".to_string());
+    let mode = std::env::args()
+        .nth(1)
+        .unwrap_or_else(|| "buffered".to_string());
     let docs = doc_count_from_env();
 
     let allocs_start = ALLOC.allocs.load(Ordering::Relaxed);
@@ -195,5 +196,9 @@ fn git_sha() -> String {
         .map(|o| o.status.success() && !o.stdout.is_empty())
         .unwrap_or(false);
 
-    if dirty { format!("{sha}-dirty") } else { sha }
+    if dirty {
+        format!("{sha}-dirty")
+    } else {
+        sha
+    }
 }
