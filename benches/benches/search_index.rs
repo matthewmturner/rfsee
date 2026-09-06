@@ -1,4 +1,7 @@
-//! Search latency in two modes:
+//! Search latency in two modes over the generated index (run
+//! `just generate-bench-data` first; select a size with RFSEE_BENCH_SIZE, default
+//! 1000). The benchmark group is size-qualified so criterion baselines never
+//! compare across dataset sizes.
 //!
 //! - warm: `search_index` on an already-parsed in-memory index (the algorithm only)
 //! - cold: read + parse the index file, then search (what the CLI and FFI do on every
@@ -13,12 +16,11 @@ const RARE_QUERY: &str = "term19999";
 const MULTI_QUERY: &str = "term0 term1 term2 term3 term4";
 
 fn bench_search(c: &mut Criterion) {
-    let docs = benches::doc_count_from_env();
-    let tfidf = benches::build_index(benches::corpus(docs));
-    let path = std::env::temp_dir().join("rfsee_bench_search_index.json");
-    tfidf.save(&path);
+    let index = benches::load_index();
+    let path = benches::bench_index_path();
 
-    let mut group = c.benchmark_group("search_index");
+    let size = benches::bench_size_from_env();
+    let mut group = c.benchmark_group(format!("search_index_{size}"));
 
     for (name, query) in [
         ("warm_common", COMMON_QUERY),
@@ -27,7 +29,7 @@ fn bench_search(c: &mut Criterion) {
     ] {
         group.bench_function(name, |b| {
             b.iter_batched(
-                || tfidf.index.clone(),
+                || index.clone(),
                 |index| rfsee_tf_idf::search_index(query.to_string(), index),
                 BatchSize::SmallInput,
             )
@@ -36,9 +38,8 @@ fn bench_search(c: &mut Criterion) {
 
     group.bench_function("cold_common", |b| {
         b.iter_batched(
-            || path.clone(),
-            |path| {
-                let file = std::fs::File::open(path).unwrap();
+            || std::fs::File::open(&path).unwrap(),
+            |file| {
                 let index: rfsee_tf_idf::Index = simd_json::from_reader(file).unwrap();
                 rfsee_tf_idf::search_index(COMMON_QUERY.to_string(), index)
             },

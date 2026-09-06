@@ -48,7 +48,7 @@ const SEARCH_TERMS_DELIMITER: &str = " ";
 const INDEX_FILE_NAME: &str = "index.json";
 const DEFAULT_INDEX_PATH: &str = "/tmp/index.json";
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct RfcEntry {
     pub number: i32,
     pub url: String,

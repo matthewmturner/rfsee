@@ -1,11 +1,12 @@
 //! Wall time for the full offline index build: per-document processing plus `finish`
-//! (IDF + term scores) over the synthetic corpus. Set RFSEE_BENCH_DOCS to scale.
+//! (IDF + term scores) over the generated corpus. Run `just generate-bench-data`
+//! first; scale the corpus with RFSEE_BENCH_DOCS at generation time.
 
 use criterion::{criterion_group, criterion_main, BatchSize, Criterion};
 
 fn bench_pipeline(c: &mut Criterion) {
-    let docs = benches::doc_count_from_env();
-    let corpus = benches::corpus(docs);
+    let corpus = benches::load_corpus();
+    let docs = corpus.len();
     let mut group = c.benchmark_group("index_pipeline");
     group.sample_size(10);
     group.bench_function(format!("build_and_finish_{docs}_docs"), |b| {
