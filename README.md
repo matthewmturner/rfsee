@@ -1,16 +1,15 @@
 # rfsee
 
-Search and view RFCs in Neovim and from the terminal.  A [TF-IDF](https://en.wikipedia.org/wiki/Tf%E2%80%93idf) index is built on the contents of all RFCs from the [IETF](https://www.ietf.org/rfc/rfc-index.txt) and then saved locally in a JSON file.  A CLI app and NeoVim plugin are provided for searching this index.  In the future additional clients may be provided.
+Search and view RFCs from the terminal.  A [TF-IDF](https://en.wikipedia.org/wiki/Tf%E2%80%93idf) index is built on the contents of all RFCs from the [IETF](https://www.ietf.org/rfc/rfc-index.txt) and then saved locally in a JSON file.  A CLI app is provided for searching this index, with output that can be piped to other tools such as editors.
 
 ## Project Goals
 
-I had three goals for this project at the offset.
+I had two goals for this project at the offset.
 
 1. Build something useful, that I hope to make use of in my day to day work
-2. Make use of FFI with Rust
-3. Build a high quality and performant project from scratch with only the minimal number of dependencies.
+2. Build a high quality and performant project from scratch with only the minimal number of dependencies.
 
-For point 3, I intend for the only dependency of this project to be a TLS library for making HTTPS calls (and potentially a JSON serialization library).  The initial release of this project will not have achieved that goal yet - but I plan to get there.
+For point 2, I intend for the only dependency of this project to be a TLS library for making HTTPS calls (and potentially a JSON serialization library).  The initial release of this project will not have achieved that goal yet - but I plan to get there.
 
 Some of the custom components that were created:
 
@@ -28,30 +27,11 @@ I time boxed my work on this project to the spare hour or two I had each day (wh
 
 ## Install
 
-### Terminal
-
 Currently the CLI app can only be installed with [cargo](https://doc.rust-lang.org/cargo/getting-started/installation.html).
-
-### NeoVim
-
-With Lazy
-
-```lua
-{
-    'matthewmturner/rfsee',
-    opts = {},
-    dependencies = {
-        "nvim-lua/plenary.nvim"
-    },
-}
-```
 
 ## Getting Started
 
-
 After installing, you can run the following to create the index.
-
-### Terminal
 
 ```bash
 rfsee index
@@ -62,20 +42,6 @@ Then, to execute a query its as simple as
 ```bash
 rfsee search --terms MY_SEARCH_TERMS
 ```
-
-### NeoVim
-
-```vim
-:RFSeeIndex
-```
-
-Then, to execute a query its as simple as 
-
-```vim
-:RFSee MY_SEARCH_TERMS
-```
-
-The above will open a new buffer with the results from your search.  You can navigate up and down and then press `<Enter>` on a line to open that RFC in your browser.  In the future this will open the selected RFC in NeoVim.
 
 ## Contributing
 
