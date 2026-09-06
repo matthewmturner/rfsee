@@ -5,6 +5,8 @@
 //! harmonic (Zipf-ish) distribution so a few terms appear in nearly every document and
 //! most terms are rare. Generation is seeded, so every run produces identical data.
 
+use std::collections::HashMap;
+
 use rand::distributions::{Distribution, WeightedIndex};
 use rand::rngs::SmallRng;
 use rand::SeedableRng;
@@ -104,4 +106,22 @@ pub fn build_index(entries: impl IntoIterator<Item = RfcEntry>) -> TfIdf {
     }
     index.finish(noop_cb);
     index
+}
+
+/// Documents per term map for the `combine_scores` benches. Common terms in the real
+/// index appear in nearly all docs.
+pub const SCORE_MAP_DOCS_PER_TERM: usize = 10_000;
+/// Number of query terms whose score maps are combined.
+pub const SCORE_MAP_QUERY_TERMS: usize = 5;
+
+/// Synthetic per-term score maps. Doc ids are shifted per term so maps partially
+/// overlap, and scores vary via a cheap hash.
+pub fn score_maps(docs_per_term: usize, query_terms: usize) -> Vec<HashMap<i32, i32>> {
+    (0..query_terms)
+        .map(|term| {
+            (0..docs_per_term as i32)
+                .map(|doc| (doc + term as i32, (doc * 31 + term as i32) % 1_000_000))
+                .collect()
+        })
+        .collect()
 }

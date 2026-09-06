@@ -4,12 +4,13 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+perf-event = "0.4"
 rand = { version = "0.8", features = ["small_rng"] }
 rfsee-tf-idf = { path = "../crates/tf_idf" }
+simd-json = "0.14.3"
 
 [dev-dependencies]
 criterion = "0.5.1"
-simd-json = "0.14.3"
 
 [[bench]]
 name = "add_rfc_entry"
