@@ -55,3 +55,6 @@ crates/threadpool/target/**
 # Test Data
 # Used in CI
 tests/test_index.json
+
+# Generated benchmark data (just generate-bench-data)
+bench-data/

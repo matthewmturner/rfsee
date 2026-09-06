@@ -12,6 +12,27 @@ simd-json = "0.14.3"
 [dev-dependencies]
 criterion = "0.5.1"
 
+# Only the criterion targets below should run under `cargo bench`; lib/bins
+# default to bench = true, which makes libtest reject criterion flags such as
+# --save-baseline.
+[lib]
+bench = false
+
+[[bin]]
+name = "benches"
+path = "src/main.rs"
+bench = false
+
+[[bin]]
+name = "perf"
+path = "src/bin/perf.rs"
+bench = false
+
+[[bin]]
+name = "generate_data"
+path = "src/bin/generate_data.rs"
+bench = false
+
 [[bench]]
 name = "add_rfc_entry"
 harness = false

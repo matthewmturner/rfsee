@@ -7,8 +7,11 @@
 //!
 //! ```sh
 //! cargo run --release -p benches --bin perf
-//! RFSEE_BENCH_DOCS=2000 RFSEE_PERF_ITERS=200 cargo run --release -p benches --bin perf
+//! RFSEE_PERF_ITERS=200 cargo run --release -p benches --bin perf
 //! ```
+//!
+//! Loads the dataset written by `just generate-bench-data`; select a size with
+//! RFSEE_BENCH_SIZE (default 1000).
 //!
 //! Workloads: warm search (algorithm only, in-memory index) for common/rare/multi
 //! queries, cold search (read + parse + search, what the CLI pays per query), and
@@ -78,7 +81,11 @@ impl Pass {
     fn read_scaled(&mut self) -> io::Result<(Vec<f64>, bool)> {
         let counts = self.group.read()?;
         let scale = counts.time_enabled() as f64 / counts.time_running().max(1) as f64;
-        let values = self.counters.iter().map(|c| counts[c] as f64 * scale).collect();
+        let values = self
+            .counters
+            .iter()
+            .map(|c| counts[c] as f64 * scale)
+            .collect();
         Ok((values, scale > 1.0))
     }
 }
@@ -145,14 +152,17 @@ fn calibrate<S>(mut setup: impl FnMut() -> S, mut run: impl FnMut(S)) -> usize {
 /// A workload runs once and returns its totals plus the iteration count used.
 type Workload<'a> = Box<dyn FnMut() -> (Totals, usize) + 'a>;
 
-fn search_workload<'a>(tfidf: &'a rfsee_tf_idf::TfIdf, query: &'a str) -> Workload<'a> {
+fn search_workload<'a>(index: &'a rfsee_tf_idf::Index, query: &'a str) -> Workload<'a> {
     Box::new(move || {
-        let setup = || tfidf.index.clone();
+        let setup = || index.clone();
         let run = |index| {
             std::hint::black_box(rfsee_tf_idf::search_index(query.to_string(), index));
         };
         let iters = calibrate(setup, run);
-        (measure(iters, setup, run).expect("perf counters failed"), iters)
+        (
+            measure(iters, setup, run).expect("perf counters failed"),
+            iters,
+        )
     })
 }
 
@@ -162,13 +172,13 @@ fn cold_workload(path: &std::path::Path) -> Workload<'_> {
         let run = |path: std::path::PathBuf| {
             let file = std::fs::File::open(path).unwrap();
             let index: rfsee_tf_idf::Index = simd_json::from_reader(file).unwrap();
-            std::hint::black_box(rfsee_tf_idf::search_index(
-                COMMON_QUERY.to_string(),
-                index,
-            ));
+            std::hint::black_box(rfsee_tf_idf::search_index(COMMON_QUERY.to_string(), index));
         };
         let iters = calibrate(setup, run);
-        (measure(iters, setup, run).expect("perf counters failed"), iters)
+        (
+            measure(iters, setup, run).expect("perf counters failed"),
+            iters,
+        )
     })
 }
 
@@ -179,7 +189,10 @@ fn combine_workload(maps: &[HashMap<i32, i32>]) -> Workload<'_> {
             std::hint::black_box(rfsee_tf_idf::combine_scores(maps));
         };
         let iters = calibrate(setup, run);
-        (measure(iters, setup, run).expect("perf counters failed"), iters)
+        (
+            measure(iters, setup, run).expect("perf counters failed"),
+            iters,
+        )
     })
 }
 
@@ -280,20 +293,16 @@ fn git_sha() -> String {
 }
 
 fn main() -> io::Result<()> {
-    let docs = benches::doc_count_from_env();
-    eprintln!("building corpus and index ({docs} docs)...");
-    let tfidf = benches::build_index(benches::corpus(docs));
-    let index_path = std::env::temp_dir().join("rfsee_bench_perf_index.json");
-    tfidf.save(&index_path);
-    let score_maps = benches::score_maps(
-        benches::SCORE_MAP_DOCS_PER_TERM,
-        benches::SCORE_MAP_QUERY_TERMS,
-    );
+    let docs = benches::bench_size_from_env();
+    eprintln!("loading bench data ({docs} docs)...");
+    let index = benches::load_index();
+    let index_path = benches::bench_index_path();
+    let score_maps = benches::load_score_maps();
 
     let mut workloads: Vec<(&str, Workload)> = vec![
-        ("warm_common", search_workload(&tfidf, COMMON_QUERY)),
-        ("warm_rare", search_workload(&tfidf, RARE_QUERY)),
-        ("warm_multi", search_workload(&tfidf, MULTI_QUERY)),
+        ("warm_common", search_workload(&index, COMMON_QUERY)),
+        ("warm_rare", search_workload(&index, RARE_QUERY)),
+        ("warm_multi", search_workload(&index, MULTI_QUERY)),
         ("cold_common", cold_workload(&index_path)),
         ("combine_scores", combine_workload(&score_maps)),
     ];

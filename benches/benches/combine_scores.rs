@@ -1,14 +1,12 @@
 //! `combine_scores` in isolation: merging per-term score maps and sorting every
 //! matching document. This is the baseline for a top-N cap, which should replace the
-//! full sort with a partial selection.
+//! full sort with a partial selection. Uses the generated score maps (run
+//! `just generate-bench-data` first).
 
 use criterion::{criterion_group, criterion_main, BatchSize, Criterion};
 
 fn bench_combine(c: &mut Criterion) {
-    let maps = benches::score_maps(
-        benches::SCORE_MAP_DOCS_PER_TERM,
-        benches::SCORE_MAP_QUERY_TERMS,
-    );
+    let maps = benches::load_score_maps();
     c.bench_function("combine_scores", |b| {
         b.iter_batched(
             || maps.clone(),
