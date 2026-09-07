@@ -19,7 +19,8 @@ build-dev:
 
 # Pass the desired verbosity without a dash, for example: just time-build-index vv
 time-build-index v="":
-    time cargo r --release --package rfsee -- index {{ if v == "" { "" } else { "-" + v } }}
+    cargo build --release --package rfsee
+    time target/release/rfsee index {{ if v == "" { "" } else { "-" + v } }}
 
 # --benches scopes to the criterion targets; without it cargo also runs the
 # libtest harness, which rejects criterion flags like --save-baseline.

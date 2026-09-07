@@ -19,6 +19,10 @@ a bounded queue for collection. Raw document text is released after tokenization
 Once all RFCs have been processed, the index computes corpus-wide inverse document
 frequencies and final scores and saves the result.
 
+The runtime's worker thread count defaults to the available parallelism of the machine. Override
+it with the global `--parallelism` flag, for example `rfsee index --parallelism 4` or
+`rfsee --parallelism 4 index`.
+
 Then, to execute a query its as simple as 
 
 ```bash

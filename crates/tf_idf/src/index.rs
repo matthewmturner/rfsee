@@ -11,7 +11,7 @@ use crate::{
     fetch::{fetch, fetch_rfc, fetch_rfc_index, RFC_EDITOR_URL_BASE},
     parse::{parse_rfc_details, parse_rfc_index},
     path::home_dir,
-    threadpool,
+    runtime::Runtime,
 };
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -183,23 +183,26 @@ impl TfIdf {
         Ok(())
     }
 
-    /// Load the RFCs in parallel using a threadpool
+    /// Load the RFCs in parallel using a default `Runtime`.
     pub fn par_load_rfcs(
         &mut self,
         progress_cb: extern "C" fn(progress: *const c_char),
     ) -> RFSeeResult<()> {
-        self.par_load_rfcs_with_report(progress_cb).map(|_| ())
+        self.par_load_rfcs_with_report(&Runtime::default(), progress_cb)
+            .map(|_| ())
     }
 
-    /// Load the RFCs in parallel and return details about successful and failed fetches.
+    /// Load the RFCs in parallel on the provided `Runtime` and return details about successful
+    /// and failed fetches.
     pub fn par_load_rfcs_with_report(
         &mut self,
+        runtime: &Runtime,
         progress_cb: extern "C" fn(progress: *const c_char),
     ) -> RFSeeResult<RfcLoadReport> {
         let raw_rfc_index = fetch_rfc_index()?;
         let raw_rfcs = parse_rfc_index(&raw_rfc_index)?;
         let mut last_progress = std::time::Instant::now();
-        self.load_stream(raw_rfcs, 12, fetch_rfc, |_, report| {
+        self.load_stream(raw_rfcs, runtime, fetch_rfc, |_, report| {
             let completed = report.loaded.len() + report.failures.len();
             if completed == report.total
                 || completed == 0
@@ -221,7 +224,7 @@ impl TfIdf {
     fn load_stream<F, P>(
         &mut self,
         raw_rfcs: Vec<&str>,
-        workers: usize,
+        runtime: &Runtime,
         fetch_entry: F,
         mut progress: P,
     ) -> RFSeeResult<RfcLoadReport>
@@ -229,12 +232,12 @@ impl TfIdf {
         F: Fn(&str) -> RFSeeResult<RfcEntry> + Send + Sync + 'static,
         P: FnMut(&Self, &RfcLoadReport),
     {
-        let pool = threadpool::ThreadPool::new(workers);
+        let pool = runtime.pool();
         // Bound completed results so slow collection applies backpressure to workers.
         // https://doc.rust-lang.org/std/sync/mpsc/fn.sync_channel.html
-        // Declare the receiver after the pool: on early return it disconnects before
-        // the pool joins workers, releasing any blocked sends.
-        let (sender, receiver) = mpsc::sync_channel(workers);
+        // On early return the receiver disconnects, releasing blocked sends.
+        // The caller owns the runtime and can reuse its pool after this load.
+        let (sender, receiver) = mpsc::sync_channel(runtime.parallelism().get());
         let fetch_entry = Arc::new(fetch_entry);
         let mut report = RfcLoadReport::default();
         for raw in raw_rfcs.into_iter().filter(|raw| !raw.trim().is_empty()) {
@@ -274,7 +277,6 @@ impl TfIdf {
             // Keep callbacks on the caller's thread.
             progress(self, &report);
         }
-        drop(pool);
         report.loaded.sort();
         report.failures.sort_by(|a, b| a.rfc.cmp(&b.rfc));
         Ok(report)
@@ -445,7 +447,7 @@ mod tests {
             let report = streaming
                 .load_stream(
                     vec!["2", "bad", "1", "3", "  "],
-                    workers,
+                    &super::Runtime::new(std::num::NonZeroUsize::new(workers).unwrap()),
                     move |raw| match raw.parse::<usize>() {
                         Ok(n) => Ok(entries[n - 1].clone()),
                         Err(_) => Err(super::RFSeeError::FetchError("fixture failure".into())),
@@ -482,7 +484,7 @@ mod tests {
         let report = index
             .load_stream(
                 vec!["1", "2"],
-                1,
+                &super::Runtime::new(std::num::NonZeroUsize::new(1).unwrap()),
                 move |raw| {
                     if raw == "2" {
                         wait.lock()
@@ -507,13 +509,39 @@ mod tests {
     }
 
     #[test]
+    fn streaming_reuses_the_supplied_runtime() {
+        let runtime = super::Runtime::new(std::num::NonZeroUsize::new(1).unwrap());
+        let mut index = TfIdf::default();
+        for number in [1, 2] {
+            let report = index
+                .load_stream(
+                    vec!["fixture"],
+                    &runtime,
+                    move |_| Ok(entry(number, "some tokens")),
+                    |_, _| {},
+                )
+                .unwrap();
+            assert_eq!(report.loaded.len(), 1);
+        }
+        assert_eq!(index.processed_rfcs.len(), 2);
+        let (sender, receiver) = std::sync::mpsc::channel();
+        runtime
+            .pool()
+            .execute(move || sender.send(()).unwrap())
+            .unwrap();
+        receiver
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap();
+    }
+
+    #[test]
     fn streaming_handles_empty_input_and_all_failures() {
         for raw in [vec!["  "], vec!["bad", "missing"]] {
             let mut index = TfIdf::default();
             let report = index
                 .load_stream(
                     raw,
-                    1,
+                    &super::Runtime::new(std::num::NonZeroUsize::new(1).unwrap()),
                     |_| Err(super::RFSeeError::FetchError("fixture failure".into())),
                     |_, _| {},
                 )
