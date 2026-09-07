@@ -14,6 +14,10 @@ After installing, you can run the following to create the index.
 rfsee index
 ```
 
+The runtime's worker thread count defaults to the available parallelism of the machine. Override
+it with the global `--parallelism` flag, for example `rfsee index --parallelism 4` or
+`rfsee --parallelism 4 index`.
+
 Then, to execute a query its as simple as 
 
 ```bash

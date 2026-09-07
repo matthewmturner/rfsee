@@ -11,7 +11,7 @@ use crate::{
     fetch::{fetch, fetch_rfc, fetch_rfc_index, RFC_EDITOR_URL_BASE},
     parse::{parse_rfc_details, parse_rfc_index},
     path::home_dir,
-    threadpool,
+    runtime::Runtime,
 };
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -153,20 +153,23 @@ impl TfIdf {
         Ok(())
     }
 
-    /// Load the RFCs in parallel using a threadpool
+    /// Load the RFCs in parallel using a default `Runtime`.
     pub fn par_load_rfcs(
         &mut self,
         progress_cb: extern "C" fn(progress: *const c_char),
     ) -> RFSeeResult<()> {
-        self.par_load_rfcs_with_report(progress_cb).map(|_| ())
+        self.par_load_rfcs_with_report(&Runtime::default(), progress_cb)
+            .map(|_| ())
     }
 
-    /// Load the RFCs in parallel and return details about successful and failed fetches.
+    /// Load the RFCs in parallel on the provided `Runtime` and return details about successful
+    /// and failed fetches.
     pub fn par_load_rfcs_with_report(
         &mut self,
+        runtime: &Runtime,
         progress_cb: extern "C" fn(progress: *const c_char),
     ) -> RFSeeResult<RfcLoadReport> {
-        let pool = threadpool::ThreadPool::new(12);
+        let pool = runtime.pool();
         let raw_rfc_index = fetch_rfc_index()?;
         let raw_rfcs: Vec<_> = parse_rfc_index(&raw_rfc_index)?
             .into_iter()

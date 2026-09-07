@@ -1,6 +1,7 @@
 use std::{
     ffi::{c_char, CStr},
     fs::File,
+    num::NonZeroUsize,
     path::PathBuf,
     sync::atomic::{AtomicU8, Ordering},
     time::{Instant, SystemTime, UNIX_EPOCH},
@@ -9,7 +10,7 @@ use std::{
 use clap::{ArgAction, Parser, Subcommand};
 use rfsee_tf_idf::{
     error::{RFSeeError, RFSeeResult},
-    get_index_path, search_index, Index, TfIdf,
+    get_index_path, search_index, Index, Runtime, TfIdf,
 };
 
 #[derive(Clone, Debug, Parser)]
@@ -18,6 +19,11 @@ pub struct Args {
     /// Increase logging detail (-v, -vv, -vvv)
     #[arg(short = 'v', long, action = ArgAction::Count, global = true)]
     verbose: u8,
+
+    /// Number of worker threads available to the runtime. Defaults to the available parallelism
+    /// of the machine.
+    #[arg(long, global = true, default_value_t = Runtime::available_parallelism())]
+    parallelism: NonZeroUsize,
 
     #[command(subcommand)]
     command: Option<Command>,
@@ -88,16 +94,14 @@ extern "C" fn print_c_char(ptr: *const c_char) {
     }
 }
 
-fn handle_command(args: Args) -> RFSeeResult<()> {
-    VERBOSITY.store(args.verbose, Ordering::Relaxed);
-
+fn handle_command(args: Args, runtime: &Runtime) -> RFSeeResult<()> {
     if let Some(command) = args.command {
         match command {
             Command::Index { path } => {
                 log(1, "Loading RFCs");
                 let start = Instant::now();
                 let mut index = TfIdf::default();
-                let report = index.par_load_rfcs_with_report(print_c_char)?;
+                let report = index.par_load_rfcs_with_report(runtime, print_c_char)?;
                 log(2, format!("Loaded RFCs in {:?}", start.elapsed()));
                 log(
                     2,
@@ -178,7 +182,14 @@ fn handle_command(args: Args) -> RFSeeResult<()> {
 
 fn main() -> RFSeeResult<()> {
     let args = Args::parse();
-    handle_command(args)?;
+    VERBOSITY.store(args.verbose, Ordering::Relaxed);
+
+    // The runtime lives for the whole process: created here, dropped (and its workers joined)
+    // when main returns.
+    let runtime = Runtime::new(args.parallelism);
+    log(2, format!("Runtime parallelism: {}", runtime.parallelism()));
+
+    handle_command(args, &runtime)?;
     Ok(())
 }
 
@@ -189,6 +200,32 @@ mod tests {
     use clap::Parser;
 
     use super::{format_log_line, format_timestamp, Args};
+
+    #[test]
+    fn parallelism_defaults_to_available_parallelism() {
+        let args = Args::try_parse_from(["rfsee", "index"]).unwrap();
+        assert_eq!(
+            args.parallelism,
+            rfsee_tf_idf::Runtime::available_parallelism()
+        );
+    }
+
+    #[test]
+    fn parallelism_can_be_overridden() {
+        let args = Args::try_parse_from(["rfsee", "index", "--parallelism", "4"]).unwrap();
+        assert_eq!(args.parallelism.get(), 4);
+    }
+
+    #[test]
+    fn parallelism_can_precede_the_subcommand() {
+        let args = Args::try_parse_from(["rfsee", "--parallelism", "2", "index"]).unwrap();
+        assert_eq!(args.parallelism.get(), 2);
+    }
+
+    #[test]
+    fn parallelism_rejects_zero() {
+        assert!(Args::try_parse_from(["rfsee", "index", "--parallelism", "0"]).is_err());
+    }
 
     #[test]
     fn timestamp_is_utc_with_millisecond_precision() {
