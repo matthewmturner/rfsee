@@ -1,10 +1,8 @@
 use std::{
     collections::HashMap,
     ffi::{c_char, CString},
-    num::NonZeroUsize,
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
-    thread::available_parallelism,
     time::Duration,
 };
 
@@ -13,7 +11,7 @@ use crate::{
     fetch::{fetch, fetch_rfc, fetch_rfc_index, RFC_EDITOR_URL_BASE},
     parse::{parse_rfc_details, parse_rfc_index},
     path::home_dir,
-    threadpool,
+    runtime::Runtime,
 };
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -49,39 +47,6 @@ const EPSILON: f32 = 0.0001;
 const SEARCH_TERMS_DELIMITER: &str = " ";
 const INDEX_FILE_NAME: &str = "index.json";
 const DEFAULT_INDEX_PATH: &str = "/tmp/index.json";
-
-/// Configuration for loading RFCs into the index.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct LoadConfig {
-    /// Number of worker threads used to fetch RFCs concurrently.
-    pub parallelism: NonZeroUsize,
-}
-
-impl LoadConfig {
-    /// Fallback used when the platform cannot report its available parallelism.
-    const FALLBACK_PARALLELISM: usize = 1;
-
-    /// Build a config with the given number of worker threads.
-    pub fn with_parallelism(parallelism: NonZeroUsize) -> Self {
-        Self { parallelism }
-    }
-
-    /// The parallelism reported by the platform, i.e. `std::thread::available_parallelism`,
-    /// falling back to a single thread when it cannot be determined.
-    pub fn default_parallelism() -> NonZeroUsize {
-        available_parallelism().unwrap_or_else(|_| {
-            NonZeroUsize::new(Self::FALLBACK_PARALLELISM).expect("fallback is non-zero")
-        })
-    }
-}
-
-impl Default for LoadConfig {
-    fn default() -> Self {
-        Self {
-            parallelism: Self::default_parallelism(),
-        }
-    }
-}
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct RfcEntry {
@@ -188,31 +153,23 @@ impl TfIdf {
         Ok(())
     }
 
-    /// Load the RFCs in parallel using a threadpool sized from `LoadConfig::default`.
+    /// Load the RFCs in parallel using a default `Runtime`.
     pub fn par_load_rfcs(
         &mut self,
         progress_cb: extern "C" fn(progress: *const c_char),
     ) -> RFSeeResult<()> {
-        self.par_load_rfcs_with_report(progress_cb).map(|_| ())
+        self.par_load_rfcs_with_report(&Runtime::default(), progress_cb)
+            .map(|_| ())
     }
 
-    /// Load the RFCs in parallel using a threadpool sized from `LoadConfig::default` and return
-    /// details about successful and failed fetches.
+    /// Load the RFCs in parallel on the provided `Runtime` and return details about successful
+    /// and failed fetches.
     pub fn par_load_rfcs_with_report(
         &mut self,
+        runtime: &Runtime,
         progress_cb: extern "C" fn(progress: *const c_char),
     ) -> RFSeeResult<RfcLoadReport> {
-        self.par_load_rfcs_with_config(LoadConfig::default(), progress_cb)
-    }
-
-    /// Load the RFCs in parallel using the provided `LoadConfig` and return details about
-    /// successful and failed fetches.
-    pub fn par_load_rfcs_with_config(
-        &mut self,
-        config: LoadConfig,
-        progress_cb: extern "C" fn(progress: *const c_char),
-    ) -> RFSeeResult<RfcLoadReport> {
-        let pool = threadpool::ThreadPool::new(config.parallelism.get());
+        let pool = runtime.pool();
         let raw_rfc_index = fetch_rfc_index()?;
         let raw_rfcs: Vec<_> = parse_rfc_index(&raw_rfc_index)?
             .into_iter()
@@ -466,25 +423,11 @@ pub fn search_index(search: String, index: Index) -> Vec<RfcSearchResult> {
 
 #[cfg(test)]
 mod tests {
-    use std::{ffi::c_char, num::NonZeroUsize};
+    use std::ffi::c_char;
 
-    use super::{parse_rfc_index, LoadConfig, RfcEntry, TfIdf};
+    use super::{parse_rfc_index, RfcEntry, TfIdf};
 
     extern "C" fn dummy_cb(_msg: *const c_char) {}
-
-    #[test]
-    fn test_load_config_defaults_to_available_parallelism() {
-        let config = LoadConfig::default();
-        let expected =
-            std::thread::available_parallelism().unwrap_or_else(|_| NonZeroUsize::new(1).unwrap());
-        assert_eq!(config.parallelism, expected);
-    }
-
-    #[test]
-    fn test_load_config_with_parallelism() {
-        let config = LoadConfig::with_parallelism(NonZeroUsize::new(3).unwrap());
-        assert_eq!(config.parallelism.get(), 3);
-    }
 
     #[test]
     fn test_parse_index() {

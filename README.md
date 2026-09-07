@@ -14,8 +14,9 @@ After installing, you can run the following to create the index.
 rfsee index
 ```
 
-RFCs are fetched concurrently using one thread per unit of available parallelism on the machine.
-Override the thread count with `--parallelism`, for example `rfsee index --parallelism 4`.
+The runtime's worker thread count defaults to the available parallelism of the machine. Override
+it with the global `--parallelism` flag, for example `rfsee index --parallelism 4` or
+`rfsee --parallelism 4 index`.
 
 Then, to execute a query its as simple as 
 
