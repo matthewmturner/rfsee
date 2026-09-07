@@ -1,6 +1,7 @@
 use std::{
     ffi::{c_char, CStr},
     fs::File,
+    num::NonZeroUsize,
     path::PathBuf,
     sync::atomic::{AtomicU8, Ordering},
     time::{Instant, SystemTime, UNIX_EPOCH},
@@ -9,7 +10,7 @@ use std::{
 use clap::{ArgAction, Parser, Subcommand};
 use rfsee_tf_idf::{
     error::{RFSeeError, RFSeeResult},
-    get_index_path, search_index, Index, TfIdf,
+    get_index_path, search_index, Index, LoadConfig, TfIdf,
 };
 
 #[derive(Clone, Debug, Parser)]
@@ -28,6 +29,10 @@ enum Command {
     Index {
         #[arg(short, long)]
         path: Option<PathBuf>,
+        /// Number of threads used to fetch RFCs. Defaults to the available parallelism of the
+        /// machine.
+        #[arg(long, default_value_t = LoadConfig::default_parallelism())]
+        parallelism: NonZeroUsize,
     },
     Search {
         #[arg(short, long)]
@@ -93,11 +98,13 @@ fn handle_command(args: Args) -> RFSeeResult<()> {
 
     if let Some(command) = args.command {
         match command {
-            Command::Index { path } => {
+            Command::Index { path, parallelism } => {
+                let config = LoadConfig::with_parallelism(parallelism);
                 log(1, "Loading RFCs");
+                log(2, format!("Parallelism: {}", config.parallelism));
                 let start = Instant::now();
                 let mut index = TfIdf::default();
-                let report = index.par_load_rfcs_with_report(print_c_char)?;
+                let report = index.par_load_rfcs_with_config(config, print_c_char)?;
                 log(2, format!("Loaded RFCs in {:?}", start.elapsed()));
                 log(
                     2,
@@ -188,7 +195,30 @@ mod tests {
 
     use clap::Parser;
 
-    use super::{format_log_line, format_timestamp, Args};
+    use super::{format_log_line, format_timestamp, Args, Command};
+
+    #[test]
+    fn parallelism_defaults_to_available_parallelism() {
+        let args = Args::try_parse_from(["rfsee", "index"]).unwrap();
+        let Some(Command::Index { parallelism, .. }) = args.command else {
+            panic!("expected index command");
+        };
+        assert_eq!(parallelism, rfsee_tf_idf::LoadConfig::default_parallelism());
+    }
+
+    #[test]
+    fn parallelism_can_be_overridden() {
+        let args = Args::try_parse_from(["rfsee", "index", "--parallelism", "4"]).unwrap();
+        let Some(Command::Index { parallelism, .. }) = args.command else {
+            panic!("expected index command");
+        };
+        assert_eq!(parallelism.get(), 4);
+    }
+
+    #[test]
+    fn parallelism_rejects_zero() {
+        assert!(Args::try_parse_from(["rfsee", "index", "--parallelism", "0"]).is_err());
+    }
 
     #[test]
     fn timestamp_is_utc_with_millisecond_precision() {
