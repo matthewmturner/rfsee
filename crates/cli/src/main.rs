@@ -39,6 +39,8 @@ enum Command {
 
 static VERBOSITY: AtomicU8 = AtomicU8::new(0);
 
+/// Format a UTC timestamp using the Internet date/time format specified by
+/// RFC 3339 section 5.6: https://www.rfc-editor.org/rfc/rfc3339.html#section-5.6
 fn format_timestamp(timestamp: SystemTime) -> String {
     let since_epoch = timestamp.duration_since(UNIX_EPOCH).unwrap_or_default();
     let seconds = since_epoch.as_secs();
