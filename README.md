@@ -20,6 +20,16 @@ Then, to execute a query its as simple as
 rfsee search --terms MY_SEARCH_TERMS
 ```
 
+Logging is controlled with repeatable `-v` flags. Logs are written to standard error so search
+results can still be piped to another program.
+
+- `-v` shows major stages such as loading, indexing, saving, and searching.
+- `-vv` also shows timings, paths, counts, and periodic progress.
+- `-vvv` also shows each RFC fetch or skip and per-term match counts.
+
+The flag may appear before or after the subcommand, for example `rfsee -vv index` or
+`rfsee search -vv --terms HTTP`.
+
 ## Contributing
 
 This is a personal project that I am using to explore and learn to build an application with minimal dependencies - as such I will likely not be accepting outside contributions.  That being said bug reports are always welcome.

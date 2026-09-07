@@ -56,6 +56,19 @@ pub struct RfcEntry {
     pub content: Option<String>,
 }
 
+#[derive(Clone, Debug)]
+pub struct RfcLoadFailure {
+    pub rfc: String,
+    pub reason: String,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct RfcLoadReport {
+    pub total: usize,
+    pub loaded: Vec<String>,
+    pub failures: Vec<RfcLoadFailure>,
+}
+
 pub struct ProcessedRfc {
     number: i32,
     term_freqs: TermFreqs,
@@ -145,13 +158,26 @@ impl TfIdf {
         &mut self,
         progress_cb: extern "C" fn(progress: *const c_char),
     ) -> RFSeeResult<()> {
+        self.par_load_rfcs_with_report(progress_cb).map(|_| ())
+    }
+
+    /// Load the RFCs in parallel and return details about successful and failed fetches.
+    pub fn par_load_rfcs_with_report(
+        &mut self,
+        progress_cb: extern "C" fn(progress: *const c_char),
+    ) -> RFSeeResult<RfcLoadReport> {
         let pool = threadpool::ThreadPool::new(12);
         let raw_rfc_index = fetch_rfc_index()?;
-        let raw_rfcs = parse_rfc_index(&raw_rfc_index)?;
+        let raw_rfcs: Vec<_> = parse_rfc_index(&raw_rfc_index)?
+            .into_iter()
+            .filter(|rfc| !rfc.trim().is_empty())
+            .collect();
         let rfcs_count = raw_rfcs.len();
 
         let parsed_rfcs: Vec<RfcEntry> = Vec::new();
         let parsed_rfcs = Arc::new(Mutex::new(parsed_rfcs));
+        let failures: Vec<RfcLoadFailure> = Vec::new();
+        let failures = Arc::new(Mutex::new(failures));
 
         let remaining = raw_rfcs.len();
         let remaining = Arc::new(Mutex::new(remaining));
@@ -160,11 +186,19 @@ impl TfIdf {
             let string = rfc.to_string();
             let remaining = Arc::clone(&remaining);
             let parsed_rfcs = Arc::clone(&parsed_rfcs);
+            let failures = Arc::clone(&failures);
             pool.execute(move || {
-                if let Ok(r) = fetch_rfc(&string) {
-                    let mut guard = parsed_rfcs.lock().unwrap();
-                    guard.push(r);
-                };
+                match fetch_rfc(&string) {
+                    Ok(rfc) => parsed_rfcs.lock().unwrap().push(rfc),
+                    Err(err) => failures.lock().unwrap().push(RfcLoadFailure {
+                        rfc: string
+                            .split_whitespace()
+                            .next()
+                            .unwrap_or("unknown")
+                            .to_string(),
+                        reason: err.to_string().trim().to_string(),
+                    }),
+                }
                 let mut guard = remaining.lock().unwrap();
                 *guard -= 1;
             })?
@@ -188,10 +222,12 @@ impl TfIdf {
             }
         }
 
+        let mut loaded = Vec::new();
         match Arc::try_unwrap(parsed_rfcs) {
             Ok(mutex) => match mutex.into_inner() {
                 Ok(rfcs) => {
                     for (i, rfc) in rfcs.into_iter().enumerate() {
+                        loaded.push(rfc.url.clone());
                         self.add_rfc_entry(rfc);
                         if i % 100 == 0 {
                             let progress = (i as f64 / rfcs_count as f64) * 100_f64;
@@ -212,7 +248,20 @@ impl TfIdf {
             }
         }
 
-        Ok(())
+        let mut failures = Arc::try_unwrap(failures)
+            .map_err(|_| {
+                RFSeeError::RuntimeError("More than one failure reference remaining".to_string())
+            })?
+            .into_inner()
+            .map_err(|err| RFSeeError::RuntimeError(err.to_string()))?;
+        loaded.sort();
+        failures.sort_by(|a, b| a.rfc.cmp(&b.rfc));
+
+        Ok(RfcLoadReport {
+            total: rfcs_count,
+            loaded,
+            failures,
+        })
     }
 
     /// Process `RfcEntry` by computing it's term frequencies and add it to index

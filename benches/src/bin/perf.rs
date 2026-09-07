@@ -6,8 +6,8 @@
 //! scalar per sample, which forces one run per event.
 //!
 //! ```sh
-//! cargo run --release -p benches --bin perf
-//! RFSEE_PERF_ITERS=200 cargo run --release -p benches --bin perf
+//! cargo run --release -p benches --bin perf --features linux-perf
+//! RFSEE_PERF_ITERS=200 cargo run --release -p benches --bin perf --features linux-perf
 //! ```
 //!
 //! Loads the dataset written by `just generate-bench-data`; select a size with

@@ -17,8 +17,9 @@ build:
 build-dev:
     cargo build
 
-time-build-index:
-    time cargo r --release --package rfsee -- index
+# Pass the desired verbosity without a dash, for example: just time-build-index vv
+time-build-index v="":
+    time cargo r --release --package rfsee -- index {{ if v == "" { "" } else { "-" + v } }}
 
 # --benches scopes to the criterion targets; without it cargo also runs the
 # libtest harness, which rejects criterion flags like --save-baseline.
@@ -36,7 +37,7 @@ bench-compare name="before":
 # Requires bench-data/ (just generate-bench-data); set RFSEE_PERF_ITERS to fix the
 # iteration count. Appends to benches/perf-profile.csv.
 bench-perf:
-    cargo run --release -p benches --bin perf
+    cargo run --release -p benches --bin perf --features linux-perf
 
 # Profile pipeline memory: alloc count, peak heap bytes, peak RSS (VmHWM)
 memory-profile mode="buffered":
