@@ -17,10 +17,19 @@ build:
 build-dev:
     cargo build
 
-# Pass the desired verbosity without a dash, for example: just time-build-index vv
-time-build-index v="":
+# Build the real index and print time, memory, CPU, I/O, and other resource stats.
+# Pass verbosity without a dash, for example: just profile-build-index vv
+profile-build-index v="":
+    #!/bin/sh
+    # macOS `time -l`: https://developer.apple.com/library/archive/documentation/System/Conceptual/ManPages_iPhoneOS/man1/time.1.html
+    # GNU `time -v`: https://www.gnu.org/software/time/manual/html_node/Invoking-time.html
+    set -eu
     cargo build --release --package rfsee
-    time target/release/rfsee index {{ if v == "" { "" } else { "-" + v } }}
+    case "$(uname -s)" in
+    Darwin) exec /usr/bin/time -l -h target/release/rfsee index {{ if v == "" { "" } else { "-" + v } }} ;;
+    Linux) exec /usr/bin/time -v target/release/rfsee index {{ if v == "" { "" } else { "-" + v } }} ;;
+    *) echo "profile-build-index supports macOS and Linux" >&2; exit 1 ;;
+    esac
 
 # --benches scopes to the criterion targets; without it cargo also runs the
 # libtest harness, which rejects criterion flags like --save-baseline.
