@@ -3,8 +3,11 @@ name = "benches"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+linux-perf = ["dep:perf-event"]
+
 [dependencies]
-perf-event = "0.4"
+perf-event = { version = "0.4", optional = true }
 rand = { version = "0.8", features = ["small_rng"] }
 rfsee-tf-idf = { path = "../crates/tf_idf" }
 simd-json = "0.14.3"
@@ -27,6 +30,7 @@ bench = false
 name = "perf"
 path = "src/bin/perf.rs"
 bench = false
+required-features = ["linux-perf"]
 
 [[bin]]
 name = "generate_data"
