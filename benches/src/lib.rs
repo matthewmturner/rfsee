@@ -57,7 +57,7 @@ fn make_entry(
     }
 }
 
-/// The whole corpus materialized at once, mirroring what `par_load_rfcs` does today:
+/// The whole corpus materialized at once, mirroring the old batch loader:
 /// every document's content is held in memory before processing starts.
 pub fn corpus(n_docs: usize) -> Vec<RfcEntry> {
     corpus_stream(n_docs).collect()

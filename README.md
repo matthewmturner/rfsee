@@ -14,6 +14,11 @@ After installing, you can run the following to create the index.
 rfsee index
 ```
 
+Workers fetch and tokenize each RFC as it arrives, then pass term frequencies through
+a bounded queue for collection. Raw document text is released after tokenization.
+Once all RFCs have been processed, the index computes corpus-wide inverse document
+frequencies and final scores and saves the result.
+
 Then, to execute a query its as simple as 
 
 ```bash

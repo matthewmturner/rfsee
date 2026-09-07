@@ -9,8 +9,8 @@
 //! ```
 //!
 //! `buffered` materializes the entire corpus in memory before processing, mirroring
-//! `par_load_rfcs` today. `streaming` generates and processes one document at a time,
-//! mirroring the pipeline after fetched documents are consumed as they arrive.
+//! the old batch loader. `streaming` generates and processes one document at a time,
+//! approximating the streaming loader without its concurrent workers and bounded queue.
 //!
 //! Reports allocation count and peak live heap bytes (via the counting allocator)
 //! plus total process peak RSS (VmHWM from /proc/self/status).
