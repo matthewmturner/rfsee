@@ -119,6 +119,7 @@ pub struct Index {
 pub struct RfcSearchResult {
     pub url: String,
     pub title: String,
+    pub score: i32,
 }
 
 pub fn get_index_path(custom_path: Option<PathBuf>) -> RFSeeResult<PathBuf> {
@@ -349,7 +350,7 @@ impl TfIdf {
 
 /// Combine the result set for each term into a single result set where a document only shows up
 /// once.  Scores are combined by adding them.
-pub fn combine_scores(scores: Vec<HashMap<i32, i32>>) -> Vec<i32> {
+fn rank_scores(scores: Vec<HashMap<i32, i32>>) -> Vec<(i32, i32)> {
     let mut combined_scores: HashMap<i32, i32> = HashMap::new();
     for score in scores {
         for (rfc_num, term_score) in score {
@@ -366,8 +367,15 @@ pub fn combine_scores(scores: Vec<HashMap<i32, i32>>) -> Vec<i32> {
     // Sort by score in descending order
     scores_list.sort_by(|(_, a_score), (_, b_score)| b_score.partial_cmp(a_score).unwrap());
 
-    // Return only the URLs
-    scores_list.into_iter().map(|(rfc, _)| rfc).collect()
+    scores_list
+}
+
+/// Combine and rank the result set for each term, returning RFC numbers in score order.
+pub fn combine_scores(scores: Vec<HashMap<i32, i32>>) -> Vec<i32> {
+    rank_scores(scores)
+        .into_iter()
+        .map(|(rfc, _)| rfc)
+        .collect()
 }
 
 /// Search the provided index for the terms and return ordered results
@@ -384,18 +392,20 @@ pub fn search_index(search: String, index: Index) -> Vec<RfcSearchResult> {
     }
 
     // Combine the scores by adding them for each document
-    let rfcs = combine_scores(scores);
+    let rfcs = rank_scores(scores);
     rfcs.iter()
-        .map(|n| {
+        .map(|(n, score)| {
             if let Some(details) = index.rfc_details.get(n) {
                 RfcSearchResult {
                     url: format!("{RFC_EDITOR_URL_BASE}{n}.{RFC_EDITOR_FILE_TYPE}"),
                     title: details.title.clone(),
+                    score: *score,
                 }
             } else {
                 RfcSearchResult {
                     url: format!("{RFC_EDITOR_URL_BASE}{n}.{RFC_EDITOR_FILE_TYPE}"),
                     title: "MISSING TITLE".to_string(),
+                    score: *score,
                 }
             }
         })
@@ -404,7 +414,7 @@ pub fn search_index(search: String, index: Index) -> Vec<RfcSearchResult> {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_rfc_index, RfcEntry, TfIdf};
+    use super::{parse_rfc_index, search_index, Index, RfcDetails, RfcEntry, TfIdf};
 
     fn ignore_progress(_: &str) {}
 
@@ -587,5 +597,39 @@ mod tests {
 
         let hello = tf_idf.index.term_scores.get("Hello");
         assert!(hello.is_some());
+    }
+
+    #[test]
+    fn search_results_include_combined_scores() {
+        let index = Index {
+            rfc_details: [
+                (
+                    1,
+                    RfcDetails {
+                        title: "One".into(),
+                    },
+                ),
+                (
+                    2,
+                    RfcDetails {
+                        title: "Two".into(),
+                    },
+                ),
+            ]
+            .into(),
+            term_scores: [
+                ("http".into(), [(1, 20), (2, 30)].into()),
+                ("cache".into(), [(1, 20)].into()),
+            ]
+            .into(),
+        };
+
+        let results = search_index("http cache".into(), index);
+
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].title, "One");
+        assert_eq!(results[0].score, 40);
+        assert_eq!(results[1].title, "Two");
+        assert_eq!(results[1].score, 30);
     }
 }
