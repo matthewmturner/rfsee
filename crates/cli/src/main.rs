@@ -3,14 +3,17 @@ use std::{
     num::NonZeroUsize,
     path::PathBuf,
     sync::atomic::{AtomicU8, Ordering},
-    time::{Instant, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use clap::{ArgAction, Parser, Subcommand};
 use rfsee_tf_idf::{
     error::{RFSeeError, RFSeeResult},
-    get_index_path, search_index, Index, Runtime, TfIdf,
+    get_index_path, search_index, Index, RfcSearchResult, Runtime, TfIdf,
 };
+
+const MAX_DISPLAYED_SEARCH_RESULTS: usize = 10;
+const STORED_SCORE_SCALE: i64 = 1_000_000_000;
 
 #[derive(Clone, Debug, Parser)]
 #[command(version, about)]
@@ -84,6 +87,41 @@ fn log(level: u8, msg: impl std::fmt::Display) {
 
 fn log_progress(message: &str) {
     log(2, message);
+}
+
+fn format_search_results(results: &[RfcSearchResult], execution_time: Duration) -> String {
+    let displayed_count = results.len().min(MAX_DISPLAYED_SEARCH_RESULTS);
+    let remaining_count = results.len() - displayed_count;
+    let mut output = String::from("Docs: [");
+
+    for result in &results[..displayed_count] {
+        output.push_str(&format!(
+            "\n    RfcSearchResult {{\n        url: {:?},\n        title: {:?},\n        score: {},\n    }},",
+            result.url,
+            result.title,
+            format_score(result.score),
+        ));
+    }
+
+    output.push_str(&format!(
+        "]\nRemaining results: {remaining_count}\nSearch execution time: {execution_time:?}"
+    ));
+    output
+}
+
+fn format_score(score: i32) -> String {
+    let score = i64::from(score);
+    let sign = if score < 0 { "-" } else { "" };
+    let magnitude = score.abs();
+    let whole = magnitude / STORED_SCORE_SCALE;
+    let fractional = format!("{:09}", magnitude % STORED_SCORE_SCALE);
+    let fractional = fractional.trim_end_matches('0');
+
+    if fractional.is_empty() {
+        format!("{sign}{whole}")
+    } else {
+        format!("{sign}{whole}.{fractional}")
+    }
 }
 
 fn handle_command(args: Args, runtime: &Runtime) -> RFSeeResult<()> {
@@ -160,12 +198,10 @@ fn handle_command(args: Args, runtime: &Runtime) -> RFSeeResult<()> {
                 log(1, "Searching index");
                 let search_start = Instant::now();
                 let results = search_index(terms, index);
-                log(
-                    2,
-                    format!("Search completed in {:?}", search_start.elapsed()),
-                );
+                let search_execution_time = search_start.elapsed();
+                log(2, format!("Search completed in {search_execution_time:?}"));
                 log(2, format!("Results: {}", results.len()));
-                println!("Docs: {results:#?}");
+                println!("{}", format_search_results(&results, search_execution_time));
             }
         }
     }
@@ -191,7 +227,19 @@ mod tests {
 
     use clap::Parser;
 
-    use super::{format_log_line, format_timestamp, Args};
+    use rfsee_tf_idf::RfcSearchResult;
+
+    use super::{format_log_line, format_score, format_search_results, format_timestamp, Args};
+
+    fn search_results(count: usize) -> Vec<RfcSearchResult> {
+        (1..=count)
+            .map(|number| RfcSearchResult {
+                url: format!("https://example.com/{number}"),
+                title: format!("Result {number}"),
+                score: number as i32 * 100,
+            })
+            .collect()
+    }
 
     #[test]
     fn parallelism_defaults_to_available_parallelism() {
@@ -245,5 +293,38 @@ mod tests {
     fn verbosity_can_follow_the_subcommand() {
         let args = Args::try_parse_from(["rfsee", "index", "-vvv"]).unwrap();
         assert_eq!(args.verbose, 3);
+    }
+
+    #[test]
+    fn search_output_shows_all_results_when_there_are_ten_or_fewer() {
+        let output = format_search_results(&search_results(10), Duration::from_micros(123));
+
+        assert!(output.contains("Result 10"));
+        assert_eq!(output.matches("title: \"Result ").count(), 10);
+        assert_eq!(output.matches("score: ").count(), 10);
+        assert!(output.contains("score: 0.000001"));
+        assert!(output.contains("Remaining results: 0"));
+        assert!(output.ends_with("Search execution time: 123µs"));
+    }
+
+    #[test]
+    fn search_output_shows_ten_results_and_the_remaining_count() {
+        let output = format_search_results(&search_results(13), Duration::from_millis(2));
+
+        assert!(output.contains("Result 10"));
+        assert!(!output.contains("Result 11"));
+        assert_eq!(output.matches("title: \"Result ").count(), 10);
+        assert_eq!(output.matches("score: ").count(), 10);
+        assert!(!output.contains("score: 0.0000011"));
+        assert!(output.contains("Remaining results: 3"));
+        assert!(output.ends_with("Search execution time: 2ms"));
+    }
+
+    #[test]
+    fn scores_are_displayed_as_unscaled_decimals() {
+        assert_eq!(format_score(123_456_789), "0.123456789");
+        assert_eq!(format_score(1_500_000_000), "1.5");
+        assert_eq!(format_score(-1), "-0.000000001");
+        assert_eq!(format_score(0), "0");
     }
 }
