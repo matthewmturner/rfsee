@@ -118,14 +118,14 @@ The stage names identify measurement boundaries:
 - `load_and_ingest`: the complete production loading call, including fetching and processing.
 - `finish`: corpus-wide scoring and construction of the searchable index.
 
-Neither profile measures serialization to `index.json`. Use `just profile-index`
+Neither profile measures serialization to `index.json`. Use `just profile-build-index`
 to measure the complete CLI process, including saving the index.
 
 Run either memory profile with:
 
 ```bash
-RFSEE_BENCH_DOCS=100 just profile-memory synthetic
-just profile-memory actual
+RFSEE_BENCH_DOCS=100 just profile-bench-memory synthetic
+just profile-bench-memory actual
 ```
 
 `RFSEE_BENCH_DOCS` applies only to the synthetic profile. The actual profile always
