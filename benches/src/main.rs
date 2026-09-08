@@ -4,21 +4,25 @@
 //! `#[global_allocator]`, so it runs as a standalone binary:
 //!
 //! ```sh
-//! cargo run --release -p benches -- [buffered|streaming]
-//! RFSEE_BENCH_DOCS=2000 cargo run --release -p benches -- streaming
+//! cargo run --release -p benches --bin benches -- synthetic
+//! cargo run --release -p benches --bin benches -- actual
+//! RFSEE_BENCH_DOCS=2000 cargo run --release -p benches --bin benches -- synthetic
 //! ```
 //!
-//! `buffered` materializes the entire corpus in memory before processing, mirroring
-//! `par_load_rfcs` today. `streaming` generates and processes one document at a time,
-//! mirroring the pipeline after fetched documents are consumed as they arrive.
+//! `synthetic` uses the deterministic generated corpus. `actual` downloads and indexes
+//! the real RFC corpus through the production `par_load_rfcs_with_report` path. Both
+//! modes use the current buffered design.
 //!
 //! Reports allocation count and peak live heap bytes (via the counting allocator)
-//! plus total process peak RSS (VmHWM from /proc/self/status).
+//! plus total process peak RSS (VmHWM from /proc/self/status). It also attributes
+//! allocations, retained heap, and temporary peak growth to the input, ingest, and
+//! finish phases in `memory-profile.csv`.
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use benches::{build_index, corpus, corpus_stream, doc_count_from_env};
+use benches::{corpus, doc_count_from_env};
+use rfsee_tf_idf::{Runtime, TfIdf};
 
 /// A [`GlobalAlloc`] wrapper that counts allocations and tracks live/peak heap bytes.
 struct CountingAlloc {
@@ -34,6 +38,21 @@ impl CountingAlloc {
             live_bytes: AtomicUsize::new(0),
             peak_bytes: AtomicUsize::new(0),
         }
+    }
+
+    fn snapshot(&self) -> AllocSnapshot {
+        AllocSnapshot {
+            allocs: self.allocs.load(Ordering::Relaxed),
+            live_bytes: self.live_bytes.load(Ordering::Relaxed),
+        }
+    }
+
+    /// Begin a new high-water measurement while preserving currently live memory.
+    fn start_phase(&self) -> AllocSnapshot {
+        let snapshot = self.snapshot();
+        self.peak_bytes
+            .store(snapshot.live_bytes, Ordering::Relaxed);
+        snapshot
     }
 }
 
@@ -57,7 +76,69 @@ unsafe impl GlobalAlloc for CountingAlloc {
 #[global_allocator]
 static ALLOC: CountingAlloc = CountingAlloc::new();
 
-/// Peak RSS (VmHWM) of this process in KiB. Linux only; returns 0 elsewhere.
+#[derive(Clone, Copy)]
+struct AllocSnapshot {
+    allocs: usize,
+    live_bytes: usize,
+}
+
+#[derive(Clone, Copy)]
+struct PhaseMetrics {
+    name: &'static str,
+    start_elapsed_ms: f64,
+    end_elapsed_ms: f64,
+    duration_ms: f64,
+    alloc_count: usize,
+    retained_bytes: i64,
+    peak_growth_bytes: usize,
+    heap_start_bytes: usize,
+    heap_end_bytes: usize,
+    heap_peak_bytes: usize,
+}
+
+fn measure_phase<T>(
+    name: &'static str,
+    run_start: std::time::Instant,
+    work: impl FnOnce() -> T,
+) -> (T, PhaseMetrics) {
+    let start = ALLOC.start_phase();
+    let start_elapsed_ms = elapsed_ms(run_start);
+    let value = work();
+    let end_elapsed_ms = elapsed_ms(run_start);
+    let end = ALLOC.snapshot();
+    let peak = ALLOC.peak_bytes.load(Ordering::Relaxed);
+    (
+        value,
+        PhaseMetrics {
+            name,
+            start_elapsed_ms,
+            end_elapsed_ms,
+            duration_ms: end_elapsed_ms - start_elapsed_ms,
+            alloc_count: end.allocs - start.allocs,
+            retained_bytes: signed_delta(end.live_bytes, start.live_bytes),
+            peak_growth_bytes: peak.saturating_sub(start.live_bytes),
+            heap_start_bytes: start.live_bytes,
+            heap_end_bytes: end.live_bytes,
+            heap_peak_bytes: peak,
+        },
+    )
+}
+
+fn elapsed_ms(start: std::time::Instant) -> f64 {
+    start.elapsed().as_secs_f64() * 1_000.0
+}
+
+fn signed_delta(end: usize, start: usize) -> i64 {
+    let magnitude = end.abs_diff(start).min(i64::MAX as usize) as i64;
+    if end >= start {
+        magnitude
+    } else {
+        -magnitude
+    }
+}
+
+/// Peak RSS (VmHWM) of this process in KiB.
+#[cfg(target_os = "linux")]
 fn peak_rss_kib() -> u64 {
     let Ok(status) = std::fs::read_to_string("/proc/self/status") else {
         return 0;
@@ -70,69 +151,140 @@ fn peak_rss_kib() -> u64 {
         .unwrap_or(0)
 }
 
-fn main() {
-    let mode = std::env::args()
-        .nth(1)
-        .unwrap_or_else(|| "buffered".to_string());
-    let docs = doc_count_from_env();
+#[cfg(target_os = "macos")]
+fn peak_rss_kib() -> u64 {
+    let mut usage = std::mem::MaybeUninit::<libc::rusage>::uninit();
+    // Darwin reports ru_maxrss in bytes; normalize it to the Linux/CSV KiB unit:
+    // https://github.com/apple/darwin-xnu/blob/main/bsd/man/man2/getrusage.2
+    let succeeded = unsafe { libc::getrusage(libc::RUSAGE_SELF, usage.as_mut_ptr()) } == 0;
+    if succeeded {
+        unsafe { usage.assume_init() }
+            .ru_maxrss
+            .try_into()
+            .map(|bytes: u64| bytes / 1024)
+            .unwrap_or(0)
+    } else {
+        0
+    }
+}
 
-    let allocs_start = ALLOC.allocs.load(Ordering::Relaxed);
-    let peak_heap_start = ALLOC.peak_bytes.load(Ordering::Relaxed);
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn peak_rss_kib() -> u64 {
+    0
+}
+
+extern "C" fn noop_cb(_: *const std::ffi::c_char) {}
+
+fn main() {
+    let profile = std::env::args()
+        .nth(1)
+        .unwrap_or_else(|| "synthetic".to_string());
+    if profile != "synthetic" && profile != "actual" {
+        eprintln!("unknown profile '{profile}', expected 'synthetic' or 'actual'");
+        std::process::exit(2);
+    }
+
+    let run_start = std::time::Instant::now();
+    let workload_start = ALLOC.snapshot();
     let rss_start_kib = peak_rss_kib();
 
-    let index = match mode.as_str() {
-        "buffered" => build_index(corpus(docs)),
-        "streaming" => build_index(corpus_stream(docs)),
-        other => {
-            eprintln!("unknown mode '{other}', expected 'buffered' or 'streaming'");
-            std::process::exit(2);
-        }
+    // Keep the production runtime alive through the final measurements in actual mode.
+    let (index, docs, phases, _runtime) = if profile == "synthetic" {
+        let docs = doc_count_from_env();
+        let (entries, input) = measure_phase("input", run_start, || corpus(docs));
+        let (mut index, ingest) = measure_phase("ingest", run_start, || {
+            let mut index = TfIdf::default();
+            for entry in entries {
+                index.add_rfc_entry(entry);
+            }
+            index
+        });
+        let ((), finish) = measure_phase("finish", run_start, || index.finish(noop_cb));
+        (index, docs, vec![input, ingest, finish], None)
+    } else {
+        let (loaded, load_and_ingest) = measure_phase("load_and_ingest", run_start, || {
+            let runtime = Runtime::default();
+            let mut index = TfIdf::default();
+            let report = index.par_load_rfcs_with_report(&runtime, noop_cb);
+            (index, runtime, report)
+        });
+        let (mut index, runtime, report) = match loaded {
+            (index, runtime, Ok(report)) => (index, runtime, report),
+            (_, _, Err(error)) => {
+                eprintln!("actual memory profile failed while loading RFCs: {error}");
+                std::process::exit(1);
+            }
+        };
+        let docs = report.loaded.len();
+        eprintln!(
+            "actual RFCs: {} loaded, {} skipped, {} total",
+            docs,
+            report.failures.len(),
+            report.total
+        );
+        let ((), finish) = measure_phase("finish", run_start, || index.finish(noop_cb));
+        (index, docs, vec![load_and_ingest, finish], Some(runtime))
     };
 
     // Keep the index alive until after the final measurements.
     let terms = std::hint::black_box(&index.index.term_scores).len();
 
-    let allocs = ALLOC.allocs.load(Ordering::Relaxed) - allocs_start;
-    let peak_heap = ALLOC.peak_bytes.load(Ordering::Relaxed) - peak_heap_start;
+    let workload_end = ALLOC.snapshot();
+    let allocs = workload_end.allocs - workload_start.allocs;
+    let peak_heap = phases
+        .iter()
+        .map(|phase| phase.heap_peak_bytes)
+        .max()
+        .unwrap_or(workload_start.live_bytes);
     let rss_end_kib = peak_rss_kib();
 
-    println!("mode={mode}");
+    println!("profile={profile}");
     println!("docs={docs}");
     println!("index_terms={terms}");
     println!("alloc_count={allocs}");
     println!("peak_heap_bytes={peak_heap}");
     println!("peak_rss_kib_start={rss_start_kib}");
     println!("peak_rss_kib_end={rss_end_kib}");
+    for phase in &phases {
+        println!(
+            "phase={} start_elapsed_ms={:.3} end_elapsed_ms={:.3} duration_ms={:.3} alloc_count={} retained_bytes={} peak_growth_bytes={} heap_end_bytes={}",
+            phase.name,
+            phase.start_elapsed_ms,
+            phase.end_elapsed_ms,
+            phase.duration_ms,
+            phase.alloc_count,
+            phase.retained_bytes,
+            phase.peak_growth_bytes,
+            phase.heap_end_bytes,
+        );
+    }
 
     let record = LogRecord {
         timestamp: unix_timestamp_ms(),
         git_sha: git_sha(),
-        mode: &mode,
+        profile: profile.clone(),
         docs,
         index_terms: terms,
-        alloc_count: allocs,
         peak_heap_bytes: peak_heap,
         peak_rss_kib: rss_end_kib,
     };
-    match append_log(&record) {
+    match append_log(&record, &phases) {
         Ok(path) => println!("logged_to={}", path.display()),
         Err(e) => eprintln!("failed to write memory profile log: {e}"),
     }
 }
 
-struct LogRecord<'a> {
+struct LogRecord {
     timestamp: u64,
     git_sha: String,
-    mode: &'a str,
+    profile: String,
     docs: usize,
     index_terms: usize,
-    alloc_count: usize,
     peak_heap_bytes: usize,
     peak_rss_kib: u64,
 }
 
-const LOG_HEADER: &str =
-    "timestamp_ms,git_sha,mode,docs,index_terms,alloc_count,peak_heap_bytes,peak_rss_kib";
+const LOG_HEADER: &str = "timestamp_ms,git_sha,profile,docs,index_terms,phase,start_elapsed_ms,end_elapsed_ms,duration_ms,alloc_count,retained_bytes,peak_growth_bytes,heap_start_bytes,heap_end_bytes,heap_peak_bytes,run_peak_heap_bytes,peak_rss_kib";
 
 /// Default log path, anchored to this crate so cwd doesn't matter. Override with
 /// the RFSEE_MEM_LOG env var.
@@ -144,7 +296,7 @@ fn log_path() -> std::path::PathBuf {
     }
 }
 
-fn append_log(record: &LogRecord) -> std::io::Result<std::path::PathBuf> {
+fn append_log(record: &LogRecord, phases: &[PhaseMetrics]) -> std::io::Result<std::path::PathBuf> {
     use std::io::Write;
 
     let path = log_path();
@@ -156,18 +308,29 @@ fn append_log(record: &LogRecord) -> std::io::Result<std::path::PathBuf> {
     if needs_header {
         writeln!(file, "{LOG_HEADER}")?;
     }
-    writeln!(
-        file,
-        "{},{},{},{},{},{},{},{}",
-        record.timestamp,
-        record.git_sha,
-        record.mode,
-        record.docs,
-        record.index_terms,
-        record.alloc_count,
-        record.peak_heap_bytes,
-        record.peak_rss_kib,
-    )?;
+    for phase in phases {
+        writeln!(
+            file,
+            "{},{},{},{},{},{},{:.3},{:.3},{:.3},{},{},{},{},{},{},{},{}",
+            record.timestamp,
+            record.git_sha,
+            record.profile,
+            record.docs,
+            record.index_terms,
+            phase.name,
+            phase.start_elapsed_ms,
+            phase.end_elapsed_ms,
+            phase.duration_ms,
+            phase.alloc_count,
+            phase.retained_bytes,
+            phase.peak_growth_bytes,
+            phase.heap_start_bytes,
+            phase.heap_end_bytes,
+            phase.heap_peak_bytes,
+            record.peak_heap_bytes,
+            record.peak_rss_kib,
+        )?;
+    }
     Ok(path)
 }
 
@@ -200,5 +363,17 @@ fn git_sha() -> String {
         format!("{sha}-dirty")
     } else {
         sha
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::signed_delta;
+
+    #[test]
+    fn signed_delta_reports_growth_and_release() {
+        assert_eq!(signed_delta(15, 10), 5);
+        assert_eq!(signed_delta(10, 15), -5);
+        assert_eq!(signed_delta(10, 10), 0);
     }
 }
