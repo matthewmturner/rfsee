@@ -18,8 +18,8 @@ build-dev:
     cargo build
 
 # Build the real index and print time, memory, CPU, I/O, and other resource stats.
-# Pass verbosity without a dash, for example: just profile-build-index vv
-profile-build-index v="":
+# Pass verbosity without a dash, for example: just profile-index vv
+profile-index v="":
     #!/bin/sh
     # macOS `time -l`: https://developer.apple.com/library/archive/documentation/System/Conceptual/ManPages_iPhoneOS/man1/time.1.html
     # GNU `time -v`: https://www.gnu.org/software/time/manual/html_node/Invoking-time.html
@@ -28,7 +28,7 @@ profile-build-index v="":
     case "$(uname -s)" in
     Darwin) exec /usr/bin/time -l -h target/release/rfsee index {{ if v == "" { "" } else { "-" + v } }} ;;
     Linux) exec /usr/bin/time -v target/release/rfsee index {{ if v == "" { "" } else { "-" + v } }} ;;
-    *) echo "profile-build-index supports macOS and Linux" >&2; exit 1 ;;
+    *) echo "profile-index supports macOS and Linux" >&2; exit 1 ;;
     esac
 
 # --benches scopes to the criterion targets; without it cargo also runs the
@@ -46,10 +46,10 @@ bench-compare name="before":
 # instructions, cache refs/misses, branch misses, plus IPC and miss rates.
 # Requires bench-data/ (just generate-bench-data); set RFSEE_PERF_ITERS to fix the
 # iteration count. Appends to benches/perf-profile.csv.
-bench-perf:
+profile-perf:
     cargo run --release -p benches --bin perf --features linux-perf
 
 # Profile pipeline memory using deterministic synthetic data (default) or the actual
 # downloaded RFC corpus. Appends run and phase measurements to memory-profile.csv.
-memory-profile profile="synthetic":
+profile-memory profile="synthetic":
     cargo run --release -p benches --bin benches -- {{profile}}
