@@ -9,9 +9,9 @@
 //! RFSEE_BENCH_DOCS=2000 cargo run --release -p benches --bin benches -- synthetic
 //! ```
 //!
-//! `synthetic` uses the deterministic generated corpus. `actual` downloads and indexes
-//! the real RFC corpus through the production `par_load_rfcs_with_report` path. Both
-//! modes use the current buffered design.
+//! `synthetic` buffers the deterministic generated corpus before processing it.
+//! `actual` downloads and indexes the real RFC corpus through the production
+//! streaming `par_load_rfcs_with_report` path.
 //!
 //! Reports allocation count and peak live heap bytes (via the counting allocator)
 //! plus total process peak RSS (VmHWM from /proc/self/status). It also attributes

@@ -18,7 +18,7 @@ build-dev:
     cargo build
 
 # Build the real index and print time, memory, CPU, I/O, and other resource stats.
-# Pass verbosity without a dash, for example: just profile-build-index vv
+# Pass verbosity without a dash, for example: just profile-build-index vv.
 profile-build-index v="":
     #!/bin/sh
     # macOS `time -l`: https://developer.apple.com/library/archive/documentation/System/Conceptual/ManPages_iPhoneOS/man1/time.1.html
@@ -46,10 +46,12 @@ bench-compare name="before":
 # instructions, cache refs/misses, branch misses, plus IPC and miss rates.
 # Requires bench-data/ (just generate-bench-data); set RFSEE_PERF_ITERS to fix the
 # iteration count. Appends to benches/perf-profile.csv.
-bench-perf:
-    cargo run --release -p benches --bin perf --features linux-perf
+profile-bench-perf:
+    cargo build --release -p benches --bin perf --features linux-perf
+    target/release/perf
 
 # Profile pipeline memory using deterministic synthetic data (default) or the actual
 # downloaded RFC corpus. Appends run and phase measurements to memory-profile.csv.
-memory-profile profile="synthetic":
-    cargo run --release -p benches --bin benches -- {{profile}}
+profile-bench-memory profile="synthetic":
+    cargo build --release -p benches --bin benches
+    target/release/benches {{profile}}

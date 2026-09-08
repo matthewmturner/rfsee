@@ -2,7 +2,7 @@ use std::{
     collections::HashMap,
     ffi::{c_char, CString},
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
+    sync::{mpsc, Arc, OnceLock},
     time::Duration,
 };
 
@@ -72,6 +72,36 @@ pub struct RfcLoadReport {
 pub struct ProcessedRfc {
     number: i32,
     term_freqs: TermFreqs,
+}
+
+fn word_regex() -> &'static Regex {
+    static WORD_REGEX: OnceLock<Regex> = OnceLock::new();
+    WORD_REGEX.get_or_init(|| Regex::new(WORD_MATCH_REGEX).unwrap())
+}
+
+fn prepare_rfc(rfc: RfcEntry, re: &Regex) -> Option<(Url, RfcDetails, ProcessedRfc)> {
+    let content = rfc.content?;
+    let mut term_counts: HashMap<&str, usize> = HashMap::new();
+    let mut terms = 0;
+    for found in re.find_iter(&content) {
+        *term_counts.entry(found.as_str()).or_default() += 1;
+        terms += 1;
+    }
+    // Term occurrence counts:
+    // https://nlp.stanford.edu/IR-book/html/htmledition/term-frequency-and-weighting-1.html
+    // Preserve rfsee's weighting: normalize by the document's total token count.
+    let term_freqs = term_counts
+        .into_iter()
+        .map(|(term, count)| (term.to_owned(), count as f32 / terms as f32))
+        .collect();
+    Some((
+        rfc.url,
+        RfcDetails { title: rfc.title },
+        ProcessedRfc {
+            number: rfc.number,
+            term_freqs,
+        },
+    ))
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -169,138 +199,99 @@ impl TfIdf {
         runtime: &Runtime,
         progress_cb: extern "C" fn(progress: *const c_char),
     ) -> RFSeeResult<RfcLoadReport> {
-        let pool = runtime.pool();
         let raw_rfc_index = fetch_rfc_index()?;
-        let raw_rfcs: Vec<_> = parse_rfc_index(&raw_rfc_index)?
-            .into_iter()
-            .filter(|rfc| !rfc.trim().is_empty())
-            .collect();
-        let rfcs_count = raw_rfcs.len();
+        let raw_rfcs = parse_rfc_index(&raw_rfc_index)?;
+        let mut last_progress = std::time::Instant::now();
+        self.load_stream(raw_rfcs, runtime, fetch_rfc, |_, report| {
+            let completed = report.loaded.len() + report.failures.len();
+            if completed == report.total
+                || completed == 0
+                || last_progress.elapsed() >= Duration::from_secs(5)
+            {
+                if let Ok(msg) = CString::new(format!(
+                    "RFCs: {} processed, {} skipped, {} remaining",
+                    report.loaded.len(),
+                    report.failures.len(),
+                    report.total - completed
+                )) {
+                    progress_cb(msg.as_ptr());
+                }
+                last_progress = std::time::Instant::now();
+            }
+        })
+    }
 
-        let parsed_rfcs: Vec<RfcEntry> = Vec::new();
-        let parsed_rfcs = Arc::new(Mutex::new(parsed_rfcs));
-        let failures: Vec<RfcLoadFailure> = Vec::new();
-        let failures = Arc::new(Mutex::new(failures));
-
-        let remaining = raw_rfcs.len();
-        let remaining = Arc::new(Mutex::new(remaining));
-
-        for rfc in raw_rfcs.into_iter() {
-            let string = rfc.to_string();
-            let remaining = Arc::clone(&remaining);
-            let parsed_rfcs = Arc::clone(&parsed_rfcs);
-            let failures = Arc::clone(&failures);
+    fn load_stream<F, P>(
+        &mut self,
+        raw_rfcs: Vec<&str>,
+        runtime: &Runtime,
+        fetch_entry: F,
+        mut progress: P,
+    ) -> RFSeeResult<RfcLoadReport>
+    where
+        F: Fn(&str) -> RFSeeResult<RfcEntry> + Send + Sync + 'static,
+        P: FnMut(&Self, &RfcLoadReport),
+    {
+        let pool = runtime.pool();
+        // Bound completed results so slow collection applies backpressure to workers.
+        // https://doc.rust-lang.org/std/sync/mpsc/fn.sync_channel.html
+        // On early return the receiver disconnects, releasing blocked sends.
+        // The caller owns the runtime and can reuse its pool after this load.
+        let (sender, receiver) = mpsc::sync_channel(runtime.parallelism().get());
+        let fetch_entry = Arc::new(fetch_entry);
+        let mut report = RfcLoadReport::default();
+        for raw in raw_rfcs.into_iter().filter(|raw| !raw.trim().is_empty()) {
+            report.total += 1;
+            let raw = raw.to_owned();
+            let sender = sender.clone();
+            let fetch_entry = Arc::clone(&fetch_entry);
+            let re = word_regex().clone();
             pool.execute(move || {
-                match fetch_rfc(&string) {
-                    Ok(rfc) => parsed_rfcs.lock().unwrap().push(rfc),
-                    Err(err) => failures.lock().unwrap().push(RfcLoadFailure {
-                        rfc: string
+                let result = fetch_entry(&raw)
+                    .and_then(|entry| {
+                        prepare_rfc(entry, &re)
+                            .ok_or_else(|| RFSeeError::ParseError("RFC has no content".to_string()))
+                    })
+                    .map_err(|err| RfcLoadFailure {
+                        rfc: raw
                             .split_whitespace()
                             .next()
                             .unwrap_or("unknown")
                             .to_string(),
                         reason: err.to_string().trim().to_string(),
-                    }),
+                    });
+                // Raw content is already released before a possibly blocking send.
+                let _ = sender.send(result);
+            })?;
+        }
+        drop(sender);
+        progress(self, &report);
+        for result in receiver {
+            match result {
+                Ok((url, details, rfc)) => {
+                    report.loaded.push(url.clone());
+                    self.insert_processed_rfc(url, details, rfc);
                 }
-                let mut guard = remaining.lock().unwrap();
-                *guard -= 1;
-            })?
-        }
-
-        let mut finished = false;
-        while !finished {
-            let remaining = remaining.clone();
-            let guard = remaining.lock().unwrap();
-            // Need to log here, and not in the thread pool because we cant have different threads
-            // call the callback
-            if let Ok(msg) = CString::new(format!("{} remaining RFCs to fetch", *guard)) {
-                progress_cb(msg.as_ptr())
+                Err(failure) => report.failures.push(failure),
             }
-            if *guard == 0 {
-                finished = true
-            } else {
-                drop(guard);
-                // Don't want to go crazy locking the Mutex, so we only check every 5 seconds
-                std::thread::sleep(Duration::from_secs(5));
-            }
+            // Keep callbacks on the caller's thread.
+            progress(self, &report);
         }
-
-        let mut loaded = Vec::new();
-        match Arc::try_unwrap(parsed_rfcs) {
-            Ok(mutex) => match mutex.into_inner() {
-                Ok(rfcs) => {
-                    for (i, rfc) in rfcs.into_iter().enumerate() {
-                        loaded.push(rfc.url.clone());
-                        self.add_rfc_entry(rfc);
-                        if i % 100 == 0 {
-                            let progress = (i as f64 / rfcs_count as f64) * 100_f64;
-                            if let Ok(msg) =
-                                CString::new(format!("Parse progress: {progress:0.0}%"))
-                            {
-                                progress_cb(msg.as_ptr())
-                            }
-                        }
-                    }
-                }
-                Err(err) => return Err(RFSeeError::RuntimeError(err.to_string())),
-            },
-            Err(_) => {
-                return Err(RFSeeError::RuntimeError(
-                    "More than one reference remaining".to_string(),
-                ))
-            }
-        }
-
-        let mut failures = Arc::try_unwrap(failures)
-            .map_err(|_| {
-                RFSeeError::RuntimeError("More than one failure reference remaining".to_string())
-            })?
-            .into_inner()
-            .map_err(|err| RFSeeError::RuntimeError(err.to_string()))?;
-        loaded.sort();
-        failures.sort_by(|a, b| a.rfc.cmp(&b.rfc));
-
-        Ok(RfcLoadReport {
-            total: rfcs_count,
-            loaded,
-            failures,
-        })
+        report.loaded.sort();
+        report.failures.sort_by(|a, b| a.rfc.cmp(&b.rfc));
+        Ok(report)
     }
 
-    /// Process `RfcEntry` by computing it's term frequencies and add it to index
+    /// Process an RFC's term frequencies and add it to the index.
     pub fn add_rfc_entry(&mut self, rfc: RfcEntry) {
-        let re = Regex::new(WORD_MATCH_REGEX).unwrap();
-
-        if let Some(content) = &rfc.content {
-            let mut term_counts: HashMap<&str, usize> = HashMap::new();
-            let mut tfs = TermFreqs::new();
-            let mut terms = 0;
-
-            for found in re.find_iter(content) {
-                if let Some(k) = term_counts.get_mut(found.as_str()) {
-                    *k += 1
-                } else {
-                    term_counts.insert(found.as_str(), 1);
-                }
-                terms += 1
-            }
-
-            for (t, c) in term_counts {
-                let frequency = c as f32 / terms as f32;
-                tfs.insert(t.to_string(), frequency);
-            }
-
-            let indexed_rfc = ProcessedRfc {
-                number: rfc.number,
-                term_freqs: tfs,
-            };
-
-            self.index
-                .rfc_details
-                .insert(rfc.number, RfcDetails { title: rfc.title });
-
-            self.processed_rfcs.insert(rfc.url, indexed_rfc);
+        if let Some((url, details, rfc)) = prepare_rfc(rfc, word_regex()) {
+            self.insert_processed_rfc(url, details, rfc);
         }
+    }
+
+    fn insert_processed_rfc(&mut self, url: Url, details: RfcDetails, rfc: ProcessedRfc) {
+        self.index.rfc_details.insert(rfc.number, details);
+        self.processed_rfcs.insert(url, rfc);
     }
 
     /// Take all the processed documents and their term frequencies to compute the final term
@@ -428,6 +419,138 @@ mod tests {
     use super::{parse_rfc_index, RfcEntry, TfIdf};
 
     extern "C" fn dummy_cb(_msg: *const c_char) {}
+
+    fn entry(number: i32, content: &str) -> RfcEntry {
+        RfcEntry {
+            number,
+            url: format!("https://example.com/{number}"),
+            title: format!("RFC {number}"),
+            content: Some(content.to_string()),
+        }
+    }
+
+    #[test]
+    fn streaming_matches_sequential_scores_and_reports_failures() {
+        for workers in [1, 4] {
+            let mut sequential = TfIdf::default();
+            let entries = [
+                entry(1, "Hello Hello world"),
+                entry(2, "world other"),
+                entry(3, ""),
+            ];
+            for rfc in entries.clone() {
+                sequential.add_rfc_entry(rfc);
+            }
+            sequential.finish(dummy_cb);
+            let mut streaming = TfIdf::default();
+            let caller = std::thread::current().id();
+            let report = streaming
+                .load_stream(
+                    vec!["2", "bad", "1", "3", "  "],
+                    &super::Runtime::new(std::num::NonZeroUsize::new(workers).unwrap()),
+                    move |raw| match raw.parse::<usize>() {
+                        Ok(n) => Ok(entries[n - 1].clone()),
+                        Err(_) => Err(super::RFSeeError::FetchError("fixture failure".into())),
+                    },
+                    |_, _| assert_eq!(std::thread::current().id(), caller),
+                )
+                .unwrap();
+            streaming.finish(dummy_cb);
+            assert_eq!(streaming.index.term_scores, sequential.index.term_scores);
+            assert_eq!(streaming.idfs, sequential.idfs);
+            assert_eq!(report.total, 4);
+            assert_eq!(
+                report.loaded,
+                vec![
+                    "https://example.com/1",
+                    "https://example.com/2",
+                    "https://example.com/3"
+                ]
+            );
+            assert_eq!(report.failures.len(), 1);
+            assert_eq!(report.failures[0].rfc, "bad");
+            assert!(report.failures[0].reason.contains("fixture failure"));
+            for (number, details) in sequential.index.rfc_details {
+                assert_eq!(streaming.index.rfc_details[&number].title, details.title);
+            }
+        }
+    }
+
+    #[test]
+    fn streaming_collects_before_last_fetch_finishes() {
+        let (release, wait) = std::sync::mpsc::channel();
+        let wait = std::sync::Mutex::new(wait);
+        let mut index = TfIdf::default();
+        let report = index
+            .load_stream(
+                vec!["1", "2"],
+                &super::Runtime::new(std::num::NonZeroUsize::new(1).unwrap()),
+                move |raw| {
+                    if raw == "2" {
+                        wait.lock()
+                            .unwrap()
+                            .recv_timeout(std::time::Duration::from_secs(5))
+                            .map_err(|_| {
+                                super::RFSeeError::RuntimeError("collection did not stream".into())
+                            })?;
+                    }
+                    Ok(entry(raw.parse().unwrap(), "some tokens"))
+                },
+                |index, report| {
+                    if report.loaded.len() == 1 && report.failures.is_empty() {
+                        assert!(index.processed_rfcs.contains_key("https://example.com/1"));
+                        release.send(()).unwrap();
+                    }
+                },
+            )
+            .unwrap();
+        assert_eq!(report.loaded.len(), 2);
+        assert!(report.failures.is_empty());
+    }
+
+    #[test]
+    fn streaming_reuses_the_supplied_runtime() {
+        let runtime = super::Runtime::new(std::num::NonZeroUsize::new(1).unwrap());
+        let mut index = TfIdf::default();
+        for number in [1, 2] {
+            let report = index
+                .load_stream(
+                    vec!["fixture"],
+                    &runtime,
+                    move |_| Ok(entry(number, "some tokens")),
+                    |_, _| {},
+                )
+                .unwrap();
+            assert_eq!(report.loaded.len(), 1);
+        }
+        assert_eq!(index.processed_rfcs.len(), 2);
+        let (sender, receiver) = std::sync::mpsc::channel();
+        runtime
+            .pool()
+            .execute(move || sender.send(()).unwrap())
+            .unwrap();
+        receiver
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap();
+    }
+
+    #[test]
+    fn streaming_handles_empty_input_and_all_failures() {
+        for raw in [vec!["  "], vec!["bad", "missing"]] {
+            let mut index = TfIdf::default();
+            let report = index
+                .load_stream(
+                    raw,
+                    &super::Runtime::new(std::num::NonZeroUsize::new(1).unwrap()),
+                    |_| Err(super::RFSeeError::FetchError("fixture failure".into())),
+                    |_, _| {},
+                )
+                .unwrap();
+            assert_eq!(report.total, report.failures.len());
+            assert!(report.loaded.is_empty());
+            assert!(index.processed_rfcs.is_empty());
+        }
+    }
 
     #[test]
     fn test_parse_index() {

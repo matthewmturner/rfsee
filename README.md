@@ -34,53 +34,98 @@ results can still be piped to another program.
 The flag may appear before or after the subcommand, for example `rfsee -vv index` or
 `rfsee search -vv --terms HTTP`.
 
-## Index build design and memory profiling
+## System design
 
-The index build is buffered: all RFCs are fetched and held in memory before indexing
-begins. The memory profiler offers two profiles of that current design:
+rfsee separates building an index from searching it. The CLI in `crates/cli` handles
+commands, logging, and file paths; `crates/tf_idf` implements fetching, parsing,
+index construction, and ranking. There is no background service: `index` builds and
+saves a local snapshot, and `search` loads that snapshot without fetching RFCs.
 
-| Profile | Data and execution path | Stages reported | Intended use |
-| --- | --- | --- | --- |
-| `synthetic` | Generates a deterministic in-process corpus with a configurable document count. It performs no network I/O and uses no worker pool. | `input`, `ingest`, `finish` | Repeatable comparisons between code changes. |
-| `actual` | Downloads the live RFC corpus and indexes it through the production `par_load_rfcs_with_report` path and its worker pool. | `load_and_ingest`, `finish` | Validate real-world process memory, including downloads and parallel loading. Results depend on the live corpus, network outcomes, machine, and available parallelism. |
+### Indexing pipeline
 
-The production loading API collects all downloads and then ingests them before returning,
-so the actual profile reports those operations together as `load_and_ingest`. The
-synthetic profile controls those operations directly and can expose the finer boundary
-between `input` and `ingest`:
-
-```text
-RFC index + RFC downloads
-           │
-           ▼
-    Vec<RfcEntry>          input
-           │
-           ▼
- per-document term maps   ingest
-           │
-           ▼
- IDFs + searchable Index  finish
-           │
-           ▼
-       index.json          not included in the memory profile
+```mermaid
+flowchart TD
+    A["Fetch and parse the RFC catalog"] --> B["Queue one job per RFC"]
+    B --> C["Runtime workers: download → tokenize → compute term frequencies"]
+    C --> D["Bounded queue of processed documents or failures"]
+    D --> E["Calling thread: collect term maps, titles, and load report"]
+    E --> F["After all results: compute IDFs and final scores"]
+    F --> G["Save index.json"]
 ```
 
-| Profile stage | Profiles | What is included | Memory state at the end |
-| --- | --- | --- | --- |
-| `input` | Synthetic | Generates the deterministic RFC corpus and materializes every `RfcEntry` in a `Vec`. | Every synthetic document's URL, title, and full text is live. |
-| `ingest` | Synthetic | Passes each buffered entry to `add_rfc_entry`: text is tokenized, terms are counted, term frequencies are calculated, and the title and per-document term-frequency map are retained. Entries and their full text are dropped as the `Vec` is consumed. | The buffered source documents are gone; `processed_rfcs` and RFC details are live. |
-| `load_and_ingest` | Actual | Fetches and parses the RFC index, downloads RFCs in parallel into a `Vec`, and then performs the same ingestion work described above. | The worker pool, `processed_rfcs`, RFC details, and load report are live; downloaded full text has been dropped. |
-| `finish` | Both | Counts terms across documents, calculates [inverse-document frequencies](https://nlp.stanford.edu/IR-book/html/htmledition/inverse-document-frequency-1.html), generates per-term/per-document scores, and populates the searchable `Index`. | The completed index and the intermediate `TfIdf` working maps remain live through measurement, matching the application while it saves the index. |
+The CLI creates one `Runtime` for the process. It owns a reusable thread pool whose
+size comes from `--parallelism`, defaulting to the available CPU parallelism with
+a fallback of one worker. The calling thread first downloads and parses the RFC
+catalog, then submits the document jobs to that pool.
 
-Serialization to `index.json` is not included in either profile. Use
-`just profile-build-index` to measure the complete CLI process, including serialization.
-Network behavior and thread-pool overhead are included only in the actual profile.
+Each worker downloads a complete RFC response before tokenizing it. It counts word
+occurrences and normalizes them by the document's total token count to produce a
+term-frequency map. Tokenization preserves case and reuses a compiled regular
+expression. Raw text is dropped before the worker sends its result.
+
+Processing therefore streams across completed documents: workers can tokenize one
+RFC while other RFCs are still downloading. The result queue holds at most as many
+results as there are workers; a full queue blocks further sends. Submitted jobs
+are queued upfront, so this bound applies to completed results, not all queued work.
+
+The calling thread owns the index state and consumes results as they arrive. It
+stores document titles and term-frequency maps, records individual failures, and
+invokes progress callbacks on that same thread. A catalog fetch or parse failure
+aborts loading; individual document errors are recorded and skipped.
+
+### Scoring, storage, and memory
+
+Final scoring waits for every result because
+[inverse document frequency](https://nlp.stanford.edu/IR-book/html/htmledition/inverse-document-frequency-1.html)
+depends on the completed corpus: both the number of indexed documents and the number
+containing each term. `finish()` counts those document frequencies, computes IDFs,
+and combines them with each document's term frequencies. rfsee scales and rounds
+the resulting scores to integers.
+
+The saved `Index` contains two mappings: RFC number to title, and term to RFC numbers
+and their scores. This inverted layout lets search retrieve the documents matching
+a term directly. Raw text and intermediate term-frequency maps are not serialized.
+
+Streaming limits buffered document text, but memory still grows with the corpus.
+All per-document term maps remain in `TfIdf` while the final score index is built,
+and both remain alive during saving. The runtime and its workers also live until
+the CLI exits. Indexing rebuilds the snapshot; it does not incrementally update the
+previous index.
+
+### Search
+
+Each `search` invocation loads the complete saved index into memory, splits the
+query on spaces, and looks up each term exactly as written. Matching is
+case-sensitive, with no stemming or query punctuation normalization. Documents
+matching any query term are candidates; their matching scores are summed and
+sorted in descending order. Results contain titles and RFC Editor URLs constructed
+from the RFC numbers.
+
+## Memory profiling
+
+The profiler measures the indexing implementation described in [System design](#system-design).
+Choose a profile based on what you want to measure:
+
+| Profile | Workload | Stages reported | Intended use |
+| --- | --- | --- | --- |
+| `synthetic` | A deterministic corpus buffered in memory, processed without network I/O or a worker pool. | `input`, `ingest`, `finish` | Repeatable comparisons of document processing and scoring. Does not exercise the production streaming pipeline. |
+| `actual` | The live RFC corpus, loaded through the production indexing API. | `load_and_ingest`, `finish` | End-to-end loading and scoring measurements. Results depend on the corpus, fetch outcomes, network, machine, and parallelism. |
+
+The stage names identify measurement boundaries:
+
+- `input`: synthetic corpus generation.
+- `ingest`: processing the synthetic documents.
+- `load_and_ingest`: the complete production loading call, including fetching and processing.
+- `finish`: corpus-wide scoring and construction of the searchable index.
+
+Neither profile measures serialization to `index.json`. Use `just profile-build-index`
+to measure the complete CLI process, including saving the index.
 
 Run either memory profile with:
 
 ```bash
-RFSEE_BENCH_DOCS=100 just memory-profile synthetic
-just memory-profile actual
+RFSEE_BENCH_DOCS=100 just profile-bench-memory synthetic
+just profile-bench-memory actual
 ```
 
 `RFSEE_BENCH_DOCS` applies only to the synthetic profile. The actual profile always
