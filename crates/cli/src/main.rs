@@ -3,7 +3,7 @@ use std::{
     num::NonZeroUsize,
     path::PathBuf,
     sync::atomic::{AtomicU8, Ordering},
-    time::{Instant, SystemTime, UNIX_EPOCH},
+    time::{Instant, SystemTime},
 };
 
 use clap::{ArgAction, Parser, Subcommand};
@@ -11,6 +11,10 @@ use rfsee_tf_idf::{
     error::{RFSeeError, RFSeeResult},
     get_index_path, search_index, Index, Runtime, TfIdf,
 };
+
+mod format;
+
+use format::{format_log_line, format_search_results};
 
 #[derive(Clone, Debug, Parser)]
 #[command(version, about)]
@@ -43,38 +47,6 @@ enum Command {
 }
 
 static VERBOSITY: AtomicU8 = AtomicU8::new(0);
-
-/// Format a UTC timestamp using the Internet date/time format specified by
-/// RFC 3339 section 5.6: https://www.rfc-editor.org/rfc/rfc3339.html#section-5.6
-fn format_timestamp(timestamp: SystemTime) -> String {
-    let since_epoch = timestamp.duration_since(UNIX_EPOCH).unwrap_or_default();
-    let seconds = since_epoch.as_secs();
-    let milliseconds = since_epoch.subsec_millis();
-    let seconds_today = seconds % 86_400;
-
-    // Convert days since the Unix epoch to a Gregorian calendar date.
-    let days = (seconds / 86_400) as i64 + 719_468;
-    let era = days / 146_097;
-    let day_of_era = days - era * 146_097;
-    let year_of_era =
-        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
-    let mut year = year_of_era + era * 400;
-    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
-    let month_position = (5 * day_of_year + 2) / 153;
-    let day = day_of_year - (153 * month_position + 2) / 5 + 1;
-    let month = month_position + if month_position < 10 { 3 } else { -9 };
-    year += i64::from(month <= 2);
-
-    let hour = seconds_today / 3_600;
-    let minute = seconds_today % 3_600 / 60;
-    let second = seconds_today % 60;
-
-    format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}.{milliseconds:03}Z")
-}
-
-fn format_log_line(timestamp: SystemTime, msg: impl std::fmt::Display) -> String {
-    format!("[{}] {msg}", format_timestamp(timestamp))
-}
 
 fn log(level: u8, msg: impl std::fmt::Display) {
     if VERBOSITY.load(Ordering::Relaxed) >= level {
@@ -160,12 +132,10 @@ fn handle_command(args: Args, runtime: &Runtime) -> RFSeeResult<()> {
                 log(1, "Searching index");
                 let search_start = Instant::now();
                 let results = search_index(terms, index);
-                log(
-                    2,
-                    format!("Search completed in {:?}", search_start.elapsed()),
-                );
+                let search_execution_time = search_start.elapsed();
+                log(2, format!("Search completed in {search_execution_time:?}"));
                 log(2, format!("Results: {}", results.len()));
-                println!("Docs: {results:#?}");
+                println!("{}", format_search_results(&results, search_execution_time));
             }
         }
     }
@@ -187,11 +157,9 @@ fn main() -> RFSeeResult<()> {
 
 #[cfg(test)]
 mod tests {
-    use std::time::{Duration, SystemTime};
-
     use clap::Parser;
 
-    use super::{format_log_line, format_timestamp, Args};
+    use super::Args;
 
     #[test]
     fn parallelism_defaults_to_available_parallelism() {
@@ -217,22 +185,6 @@ mod tests {
     #[test]
     fn parallelism_rejects_zero() {
         assert!(Args::try_parse_from(["rfsee", "index", "--parallelism", "0"]).is_err());
-    }
-
-    #[test]
-    fn timestamp_is_utc_with_millisecond_precision() {
-        let timestamp = SystemTime::UNIX_EPOCH
-            + Duration::from_secs(1_704_067_200)
-            + Duration::from_millis(123);
-        assert_eq!(format_timestamp(timestamp), "2024-01-01T00:00:00.123Z");
-    }
-
-    #[test]
-    fn log_lines_include_an_rfc3339_timestamp() {
-        assert_eq!(
-            format_log_line(SystemTime::UNIX_EPOCH, "Loading index"),
-            "[1970-01-01T00:00:00.000Z] Loading index"
-        );
     }
 
     #[test]
