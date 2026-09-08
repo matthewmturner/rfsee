@@ -95,6 +95,7 @@ name = "benches"
 version = "0.1.0"
 dependencies = [
  "criterion",
+ "libc",
  "perf-event",
  "rand",
  "rfsee-tf-idf",

@@ -7,6 +7,7 @@ edition = "2021"
 linux-perf = ["dep:perf-event"]
 
 [dependencies]
+libc = "0.2"
 perf-event = { version = "0.4", optional = true }
 rand = { version = "0.8", features = ["small_rng"] }
 rfsee-tf-idf = { path = "../crates/tf_idf" }

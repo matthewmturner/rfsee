@@ -49,6 +49,7 @@ bench-compare name="before":
 bench-perf:
     cargo run --release -p benches --bin perf --features linux-perf
 
-# Profile pipeline memory: alloc count, peak heap bytes, peak RSS (VmHWM)
-memory-profile mode="buffered":
-    cargo run --release -p benches -- {{mode}}
+# Profile pipeline memory using deterministic synthetic data (default) or the actual
+# downloaded RFC corpus. Appends run and phase measurements to memory-profile.csv.
+memory-profile profile="synthetic":
+    cargo run --release -p benches --bin benches -- {{profile}}
