@@ -1,5 +1,4 @@
 use std::{
-    ffi::{c_char, CStr},
     fs::File,
     num::NonZeroUsize,
     path::PathBuf,
@@ -83,15 +82,8 @@ fn log(level: u8, msg: impl std::fmt::Display) {
     }
 }
 
-extern "C" fn print_c_char(ptr: *const c_char) {
-    if ptr.is_null() {
-        return;
-    }
-
-    let msg = unsafe { CStr::from_ptr(ptr) };
-    if let Ok(msg) = msg.to_str() {
-        log(2, msg)
-    }
+fn log_progress(message: &str) {
+    log(2, message);
 }
 
 fn handle_command(args: Args, runtime: &Runtime) -> RFSeeResult<()> {
@@ -101,7 +93,7 @@ fn handle_command(args: Args, runtime: &Runtime) -> RFSeeResult<()> {
                 log(1, "Loading RFCs");
                 let start = Instant::now();
                 let mut index = TfIdf::default();
-                let report = index.par_load_rfcs_with_report(runtime, print_c_char)?;
+                let report = index.par_load_rfcs_with_report(runtime, log_progress)?;
                 log(2, format!("Loaded RFCs in {:?}", start.elapsed()));
                 log(
                     2,
@@ -126,7 +118,7 @@ fn handle_command(args: Args, runtime: &Runtime) -> RFSeeResult<()> {
 
                 log(1, "Building index");
                 let building_index_start = Instant::now();
-                index.finish(print_c_char);
+                index.finish(log_progress);
                 log(
                     2,
                     format!("Built index in {:?}", building_index_start.elapsed()),

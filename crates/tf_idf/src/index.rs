@@ -1,6 +1,5 @@
 use std::{
     collections::HashMap,
-    ffi::{c_char, CString},
     path::{Path, PathBuf},
     sync::{mpsc, Arc, OnceLock},
     time::Duration,
@@ -116,7 +115,6 @@ pub struct Index {
     pub term_scores: HashMap<Term, HashMap<RfcNumber, TermScore>>,
 }
 
-#[repr(C)]
 #[derive(Debug)]
 pub struct RfcSearchResult {
     pub url: String,
@@ -141,7 +139,6 @@ pub fn get_index_path(custom_path: Option<PathBuf>) -> RFSeeResult<PathBuf> {
     }
 }
 
-#[repr(C)]
 #[derive(Default)]
 pub struct TfIdf {
     /// Term frequencies for the document at a url.
@@ -184,21 +181,21 @@ impl TfIdf {
     }
 
     /// Load the RFCs in parallel using a default `Runtime`.
-    pub fn par_load_rfcs(
-        &mut self,
-        progress_cb: extern "C" fn(progress: *const c_char),
-    ) -> RFSeeResult<()> {
-        self.par_load_rfcs_with_report(&Runtime::default(), progress_cb)
+    pub fn par_load_rfcs(&mut self, progress: impl FnMut(&str)) -> RFSeeResult<()> {
+        self.par_load_rfcs_with_report(&Runtime::default(), progress)
             .map(|_| ())
     }
 
     /// Load the RFCs in parallel on the provided `Runtime` and return details about successful
     /// and failed fetches.
-    pub fn par_load_rfcs_with_report(
+    pub fn par_load_rfcs_with_report<P>(
         &mut self,
         runtime: &Runtime,
-        progress_cb: extern "C" fn(progress: *const c_char),
-    ) -> RFSeeResult<RfcLoadReport> {
+        mut progress: P,
+    ) -> RFSeeResult<RfcLoadReport>
+    where
+        P: FnMut(&str),
+    {
         let raw_rfc_index = fetch_rfc_index()?;
         let raw_rfcs = parse_rfc_index(&raw_rfc_index)?;
         let mut last_progress = std::time::Instant::now();
@@ -208,14 +205,13 @@ impl TfIdf {
                 || completed == 0
                 || last_progress.elapsed() >= Duration::from_secs(5)
             {
-                if let Ok(msg) = CString::new(format!(
+                let message = format!(
                     "RFCs: {} processed, {} skipped, {} remaining",
                     report.loaded.len(),
                     report.failures.len(),
                     report.total - completed
-                )) {
-                    progress_cb(msg.as_ptr());
-                }
+                );
+                progress(&message);
                 last_progress = std::time::Instant::now();
             }
         })
@@ -296,10 +292,8 @@ impl TfIdf {
 
     /// Take all the processed documents and their term frequencies to compute the final term
     /// scores
-    pub fn finish(&mut self, progress_cb: extern "C" fn(*const c_char)) {
-        if let Ok(msg) = CString::new("Collecting terms") {
-            progress_cb(msg.as_ptr())
-        }
+    pub fn finish(&mut self, mut progress: impl FnMut(&str)) {
+        progress("Collecting terms");
         // First, we collect all terms and the number of docs they appear in
         let mut term_counts: HashMap<&String, usize> = HashMap::new();
         for indexed_rfc in self.processed_rfcs.values() {
@@ -312,9 +306,7 @@ impl TfIdf {
             }
         }
 
-        if let Ok(msg) = CString::new("Computing inverse document frequencies") {
-            progress_cb(msg.as_ptr())
-        }
+        progress("Computing inverse document frequencies");
         // Then we compute the inverse document frequency for each term
         let total_docs = self.processed_rfcs.len();
         for (term, docs_with_term) in term_counts {
@@ -323,9 +315,7 @@ impl TfIdf {
             self.idfs.insert(term.clone(), scaled);
         }
 
-        if let Ok(msg) = CString::new("Scoring documents") {
-            progress_cb(msg.as_ptr())
-        }
+        progress("Scoring documents");
         // Then we compute the score for each term in all documents
         self.processed_rfcs.iter().for_each(|(_doc, rfc)| {
             for (doc_term, freq) in &rfc.term_freqs {
@@ -414,11 +404,9 @@ pub fn search_index(search: String, index: Index) -> Vec<RfcSearchResult> {
 
 #[cfg(test)]
 mod tests {
-    use std::ffi::c_char;
-
     use super::{parse_rfc_index, RfcEntry, TfIdf};
 
-    extern "C" fn dummy_cb(_msg: *const c_char) {}
+    fn ignore_progress(_: &str) {}
 
     fn entry(number: i32, content: &str) -> RfcEntry {
         RfcEntry {
@@ -441,7 +429,7 @@ mod tests {
             for rfc in entries.clone() {
                 sequential.add_rfc_entry(rfc);
             }
-            sequential.finish(dummy_cb);
+            sequential.finish(ignore_progress);
             let mut streaming = TfIdf::default();
             let caller = std::thread::current().id();
             let report = streaming
@@ -455,7 +443,7 @@ mod tests {
                     |_, _| assert_eq!(std::thread::current().id(), caller),
                 )
                 .unwrap();
-            streaming.finish(dummy_cb);
+            streaming.finish(ignore_progress);
             assert_eq!(streaming.index.term_scores, sequential.index.term_scores);
             assert_eq!(streaming.idfs, sequential.idfs);
             assert_eq!(report.total, 4);
@@ -570,7 +558,7 @@ mod tests {
             url: "https://www.rfsee.com/1".to_string(),
         };
         tf_idf.add_rfc_entry(entry);
-        tf_idf.finish(dummy_cb);
+        tf_idf.finish(ignore_progress);
 
         assert_eq!(tf_idf.index.rfc_details.len(), 1);
         assert_eq!(tf_idf.index.term_scores.len(), 2);
@@ -591,7 +579,7 @@ mod tests {
             url: "https://www.rfsee.com/1".to_string(),
         };
         tf_idf.add_rfc_entry(entry);
-        tf_idf.finish(dummy_cb);
+        tf_idf.finish(ignore_progress);
 
         assert_eq!(tf_idf.index.rfc_details.len(), 1);
         // This should be 1 once we update parsing to treat "Hello" and "hello" the same

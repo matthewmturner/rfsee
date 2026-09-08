@@ -4,8 +4,7 @@
 //! compare across dataset sizes.
 //!
 //! - warm: `search_index` on an already-parsed in-memory index (the algorithm only)
-//! - cold: read + parse the index file, then search (what the CLI and FFI do on every
-//!   search today)
+//! - cold: read + parse the index file, then search (what the CLI does on every search today)
 //!
 //! Queries cover a common term, a rare term, and a multi-term query.
 

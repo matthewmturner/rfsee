@@ -19,8 +19,6 @@ use std::io::{BufWriter, Write};
 
 use rfsee_tf_idf::TfIdf;
 
-extern "C" fn noop_cb(_: *const std::ffi::c_char) {}
-
 fn generate(docs: usize) -> std::io::Result<()> {
     let dir = benches::bench_data_dir().join(docs.to_string());
     std::fs::create_dir_all(&dir)?;
@@ -36,7 +34,7 @@ fn generate(docs: usize) -> std::io::Result<()> {
     corpus_file.flush()?;
 
     eprintln!("finishing index ({docs} docs)...");
-    index.finish(noop_cb);
+    index.finish(|_| {});
     index.save(&dir.join("index.json"));
     Ok(())
 }

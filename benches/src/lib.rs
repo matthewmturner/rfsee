@@ -96,15 +96,13 @@ impl Iterator for CorpusStream {
     }
 }
 
-extern "C" fn noop_cb(_: *const std::ffi::c_char) {}
-
 /// Process entries into a finished index (term frequencies + IDF + term scores).
 pub fn build_index(entries: impl IntoIterator<Item = RfcEntry>) -> TfIdf {
     let mut index = TfIdf::default();
     for entry in entries {
         index.add_rfc_entry(entry);
     }
-    index.finish(noop_cb);
+    index.finish(|_| {});
     index
 }
 

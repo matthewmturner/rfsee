@@ -173,8 +173,6 @@ fn peak_rss_kib() -> u64 {
     0
 }
 
-extern "C" fn noop_cb(_: *const std::ffi::c_char) {}
-
 fn main() {
     let profile = std::env::args()
         .nth(1)
@@ -199,13 +197,13 @@ fn main() {
             }
             index
         });
-        let ((), finish) = measure_phase("finish", run_start, || index.finish(noop_cb));
+        let ((), finish) = measure_phase("finish", run_start, || index.finish(|_| {}));
         (index, docs, vec![input, ingest, finish], None)
     } else {
         let (loaded, load_and_ingest) = measure_phase("load_and_ingest", run_start, || {
             let runtime = Runtime::default();
             let mut index = TfIdf::default();
-            let report = index.par_load_rfcs_with_report(&runtime, noop_cb);
+            let report = index.par_load_rfcs_with_report(&runtime, |_| {});
             (index, runtime, report)
         });
         let (mut index, runtime, report) = match loaded {
@@ -222,7 +220,7 @@ fn main() {
             report.failures.len(),
             report.total
         );
-        let ((), finish) = measure_phase("finish", run_start, || index.finish(noop_cb));
+        let ((), finish) = measure_phase("finish", run_start, || index.finish(|_| {}));
         (index, docs, vec![load_and_ingest, finish], Some(runtime))
     };
 
