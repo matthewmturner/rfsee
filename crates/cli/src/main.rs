@@ -1,5 +1,6 @@
 use std::{
     fs::File,
+    io::{self, IsTerminal},
     num::NonZeroUsize,
     path::PathBuf,
     sync::atomic::{AtomicU8, Ordering},
@@ -9,12 +10,15 @@ use std::{
 use clap::{ArgAction, Parser, Subcommand};
 use rfsee_tf_idf::{
     error::{RFSeeError, RFSeeResult},
-    get_index_path, search_index, Index, Runtime, TfIdf,
+    get_index_path, search_index, Index, RfcSearchResult, Runtime, TfIdf,
 };
 
+mod browser;
+mod config;
 mod format;
+mod inline;
 
-use format::{format_log_line, format_search_results};
+use format::{format_log_line, format_score, format_search_results_tsv, parse_score};
 
 #[derive(Clone, Debug, Parser)]
 #[command(version, about)]
@@ -28,6 +32,10 @@ pub struct Args {
     #[arg(long, global = true, default_value_t = Runtime::available_parallelism())]
     parallelism: NonZeroUsize,
 
+    /// Path to the configuration file.
+    #[arg(long, global = true)]
+    config: Option<PathBuf>,
+
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -39,10 +47,16 @@ enum Command {
         path: Option<PathBuf>,
     },
     Search {
+        /// Print results as TSV without the interactive inline picker.
+        #[arg(long)]
+        plain: bool,
         #[arg(short, long)]
         terms: String,
         #[arg(short, long)]
         index_path: Option<PathBuf>,
+        /// Only show results with a score greater than this decimal value (default: 0.001).
+        #[arg(long, value_parser = parse_score)]
+        min_score: Option<i32>,
     },
 }
 
@@ -58,7 +72,12 @@ fn log_progress(message: &str) {
     log(2, message);
 }
 
+fn filter_results_by_score(results: &mut Vec<RfcSearchResult>, min_score: i32) {
+    results.retain(|result| result.score > min_score);
+}
+
 fn handle_command(args: Args, runtime: &Runtime) -> RFSeeResult<()> {
+    let config_path = args.config.clone();
     if let Some(command) = args.command {
         match command {
             Command::Index { path } => {
@@ -111,7 +130,12 @@ fn handle_command(args: Args, runtime: &Runtime) -> RFSeeResult<()> {
                 index.save(&index_path);
                 log(2, format!("Saved index in {:?}", saving_start.elapsed()));
             }
-            Command::Search { terms, index_path } => {
+            Command::Search {
+                terms,
+                index_path,
+                plain,
+                min_score,
+            } => {
                 log(1, "Loading index");
                 let start = Instant::now();
                 let index_path = get_index_path(index_path)?;
@@ -131,11 +155,37 @@ fn handle_command(args: Args, runtime: &Runtime) -> RFSeeResult<()> {
 
                 log(1, "Searching index");
                 let search_start = Instant::now();
-                let results = search_index(terms, index);
+                let mut results = search_index(terms, index);
                 let search_execution_time = search_start.elapsed();
                 log(2, format!("Search completed in {search_execution_time:?}"));
-                log(2, format!("Results: {}", results.len()));
-                println!("{}", format_search_results(&results, search_execution_time));
+                let file_config = config::load(config_path.as_deref())?;
+                let min_score = file_config.resolve_min_score(min_score);
+                let unfiltered_count = results.len();
+                filter_results_by_score(&mut results, min_score);
+                log(
+                    2,
+                    format!(
+                        "Results above {}: {} of {unfiltered_count}",
+                        format_score(min_score),
+                        results.len()
+                    ),
+                );
+                if !plain
+                    && io::stdin().is_terminal()
+                    && io::stdout().is_terminal()
+                    && !results.is_empty()
+                {
+                    if let Some(selected) =
+                        inline::pick(&results).map_err(|e| RFSeeError::IOError(e.to_string()))?
+                    {
+                        let url = &results[selected].url;
+                        browser::open(url).map_err(|e| {
+                            RFSeeError::IOError(format!("Could not open {url} in the browser: {e}"))
+                        })?;
+                    }
+                } else {
+                    println!("{}", format_search_results_tsv(&results));
+                }
             }
         }
     }
@@ -159,7 +209,9 @@ fn main() -> RFSeeResult<()> {
 mod tests {
     use clap::Parser;
 
-    use super::Args;
+    use rfsee_tf_idf::RfcSearchResult;
+
+    use super::{filter_results_by_score, Args, Command};
 
     #[test]
     fn parallelism_defaults_to_available_parallelism() {
@@ -197,5 +249,45 @@ mod tests {
     fn verbosity_can_follow_the_subcommand() {
         let args = Args::try_parse_from(["rfsee", "index", "-vvv"]).unwrap();
         assert_eq!(args.verbose, 3);
+    }
+
+    #[test]
+    fn minimum_score_is_unset_without_a_cli_flag() {
+        let args = Args::try_parse_from(["rfsee", "search", "--terms", "http"]).unwrap();
+        let Some(Command::Search { min_score, .. }) = args.command else {
+            panic!("expected search command");
+        };
+        assert_eq!(min_score, None);
+    }
+
+    #[test]
+    fn minimum_score_uses_displayed_decimal_scale() {
+        let args = Args::try_parse_from([
+            "rfsee",
+            "search",
+            "--terms",
+            "http",
+            "--min-score",
+            "0.123456789",
+        ])
+        .unwrap();
+        let Some(Command::Search { min_score, .. }) = args.command else {
+            panic!("expected search command");
+        };
+        assert_eq!(min_score, Some(123_456_789));
+    }
+
+    #[test]
+    fn minimum_score_is_an_exclusive_threshold() {
+        let mut results = [9, 10, 11]
+            .map(|score| RfcSearchResult {
+                url: String::new(),
+                title: String::new(),
+                score,
+            })
+            .into();
+        filter_results_by_score(&mut results, 10);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].score, 11);
     }
 }
