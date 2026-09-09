@@ -1,5 +1,6 @@
 use std::{
     fs::File,
+    io::{self, IsTerminal},
     num::NonZeroUsize,
     path::PathBuf,
     sync::atomic::{AtomicU8, Ordering},
@@ -12,7 +13,9 @@ use rfsee_tf_idf::{
     get_index_path, search_index, Index, Runtime, TfIdf,
 };
 
+mod browser;
 mod format;
+mod inline;
 
 use format::{format_log_line, format_search_results};
 
@@ -39,6 +42,9 @@ enum Command {
         path: Option<PathBuf>,
     },
     Search {
+        /// Print results without the interactive inline picker.
+        #[arg(long)]
+        plain: bool,
         #[arg(short, long)]
         terms: String,
         #[arg(short, long)]
@@ -111,7 +117,11 @@ fn handle_command(args: Args, runtime: &Runtime) -> RFSeeResult<()> {
                 index.save(&index_path);
                 log(2, format!("Saved index in {:?}", saving_start.elapsed()));
             }
-            Command::Search { terms, index_path } => {
+            Command::Search {
+                terms,
+                index_path,
+                plain,
+            } => {
                 log(1, "Loading index");
                 let start = Instant::now();
                 let index_path = get_index_path(index_path)?;
@@ -135,7 +145,22 @@ fn handle_command(args: Args, runtime: &Runtime) -> RFSeeResult<()> {
                 let search_execution_time = search_start.elapsed();
                 log(2, format!("Search completed in {search_execution_time:?}"));
                 log(2, format!("Results: {}", results.len()));
-                println!("{}", format_search_results(&results, search_execution_time));
+                if !plain
+                    && io::stdin().is_terminal()
+                    && io::stdout().is_terminal()
+                    && !results.is_empty()
+                {
+                    if let Some(selected) =
+                        inline::pick(&results).map_err(|e| RFSeeError::IOError(e.to_string()))?
+                    {
+                        let url = &results[selected].url;
+                        browser::open(url).map_err(|e| {
+                            RFSeeError::IOError(format!("Could not open {url} in the browser: {e}"))
+                        })?;
+                    }
+                } else {
+                    println!("{}", format_search_results(&results, search_execution_time));
+                }
             }
         }
     }

@@ -24,6 +24,15 @@ Then, to execute a query its as simple as
 rfsee search --terms MY_SEARCH_TERMS
 ```
 
+In a terminal, search opens an inline result picker showing up to ten results at a time.
+Use Up/Down (or k/j) to navigate, Home/End to jump, and Enter to open the selected RFC
+in your default browser. Esc, q, or Ctrl-C dismisses the picker. The picker clears itself when it exits.
+It uses the normal terminal screen and may scroll earlier output upward to make room.
+
+Use `rfsee search --terms HTTP --plain` for the original text output. Redirecting or
+piping output, or redirecting input, also selects plain output automatically. Empty
+searches print the normal zero-result summary without opening the picker.
+
 Logging is controlled with repeatable `-v` flags. Logs are written to standard error so search
 results can still be piped to another program.
 
