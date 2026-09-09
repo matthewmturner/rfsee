@@ -1,8 +1,7 @@
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use rfsee_tf_idf::RfcSearchResult;
 
-const MAX_DISPLAYED_SEARCH_RESULTS: usize = 10;
 const STORED_SCORE_SCALE: i64 = 1_000_000_000;
 
 /// Format a UTC timestamp using the Internet date/time format specified by
@@ -37,27 +36,29 @@ pub(crate) fn format_log_line(timestamp: SystemTime, msg: impl std::fmt::Display
     format!("[{}] {msg}", format_timestamp(timestamp))
 }
 
-pub(crate) fn format_search_results(
-    results: &[RfcSearchResult],
-    execution_time: Duration,
-) -> String {
-    let displayed_count = results.len().min(MAX_DISPLAYED_SEARCH_RESULTS);
-    let remaining_count = results.len() - displayed_count;
-    let mut output = String::from("Docs: [");
-
-    for result in &results[..displayed_count] {
-        output.push_str(&format!(
-            "\n    RfcSearchResult {{\n        url: {:?},\n        title: {:?},\n        score: {},\n    }},",
-            result.url,
-            result.title,
-            format_score(result.score),
-        ));
+pub(crate) fn format_search_results_tsv(results: &[RfcSearchResult]) -> String {
+    // TSV uses tabs between fields and one record per line; tabs and line breaks cannot occur
+    // inside fields. https://www.iana.org/assignments/media-types/text/tab-separated-values
+    let mut output = String::from("url\ttitle\tscore");
+    for result in results {
+        output.push('\n');
+        output.push_str(&sanitize_tsv_field(&result.url));
+        output.push('\t');
+        output.push_str(&sanitize_tsv_field(&result.title));
+        output.push('\t');
+        output.push_str(&format_score(result.score));
     }
-
-    output.push_str(&format!(
-        "]\nRemaining results: {remaining_count}\nSearch execution time: {execution_time:?}"
-    ));
     output
+}
+
+fn sanitize_tsv_field(field: &str) -> String {
+    field
+        .chars()
+        .map(|character| match character {
+            '\t' | '\r' | '\n' => ' ',
+            character => character,
+        })
+        .collect()
 }
 
 pub(crate) fn format_score(score: i32) -> String {
@@ -75,13 +76,55 @@ pub(crate) fn format_score(score: i32) -> String {
     }
 }
 
+pub(crate) fn parse_score(input: &str) -> Result<i32, String> {
+    let (negative, unsigned) = match input.as_bytes().first() {
+        Some(b'-') => (true, &input[1..]),
+        Some(b'+') => (false, &input[1..]),
+        _ => (false, input),
+    };
+    let (whole, fractional) = unsigned.split_once('.').unwrap_or((unsigned, ""));
+    if (whole.is_empty() && fractional.is_empty())
+        || !whole.chars().all(|character| character.is_ascii_digit())
+        || !fractional
+            .chars()
+            .all(|character| character.is_ascii_digit())
+        || fractional.len() > 9
+    {
+        return Err("score must be a decimal number with at most 9 fractional digits".into());
+    }
+
+    let whole = if whole.is_empty() {
+        0
+    } else {
+        whole
+            .parse::<i64>()
+            .map_err(|_| "score is outside the supported range")?
+    };
+    let fractional = if fractional.is_empty() {
+        0
+    } else {
+        fractional
+            .parse::<i64>()
+            .map_err(|_| "score is outside the supported range")?
+            * 10_i64.pow(9 - fractional.len() as u32)
+    };
+    let magnitude = whole
+        .checked_mul(STORED_SCORE_SCALE)
+        .and_then(|value| value.checked_add(fractional))
+        .ok_or("score is outside the supported range")?;
+    let scaled = if negative { -magnitude } else { magnitude };
+    i32::try_from(scaled).map_err(|_| "score is outside the supported range".into())
+}
+
 #[cfg(test)]
 mod tests {
     use std::time::{Duration, SystemTime};
 
     use rfsee_tf_idf::RfcSearchResult;
 
-    use super::{format_log_line, format_score, format_search_results, format_timestamp};
+    use super::{
+        format_log_line, format_score, format_search_results_tsv, format_timestamp, parse_score,
+    };
 
     fn search_results(count: usize) -> Vec<RfcSearchResult> {
         (1..=count)
@@ -110,28 +153,38 @@ mod tests {
     }
 
     #[test]
-    fn search_output_shows_all_results_when_there_are_ten_or_fewer() {
-        let output = format_search_results(&search_results(10), Duration::from_micros(123));
+    fn search_output_is_tsv_with_a_header() {
+        let output = format_search_results_tsv(&search_results(2));
 
-        assert!(output.contains("Result 10"));
-        assert_eq!(output.matches("title: \"Result ").count(), 10);
-        assert_eq!(output.matches("score: ").count(), 10);
-        assert!(output.contains("score: 0.000001"));
-        assert!(output.contains("Remaining results: 0"));
-        assert!(output.ends_with("Search execution time: 123µs"));
+        assert_eq!(
+            output,
+            "url\ttitle\tscore\nhttps://example.com/1\tResult 1\t0.0000001\nhttps://example.com/2\tResult 2\t0.0000002"
+        );
     }
 
     #[test]
-    fn search_output_shows_ten_results_and_the_remaining_count() {
-        let output = format_search_results(&search_results(13), Duration::from_millis(2));
+    fn search_output_includes_every_result() {
+        let output = format_search_results_tsv(&search_results(13));
+        assert_eq!(output.lines().count(), 14);
+        assert!(output.contains("https://example.com/13\tResult 13\t0.0000013"));
+    }
 
-        assert!(output.contains("Result 10"));
-        assert!(!output.contains("Result 11"));
-        assert_eq!(output.matches("title: \"Result ").count(), 10);
-        assert_eq!(output.matches("score: ").count(), 10);
-        assert!(!output.contains("score: 0.0000011"));
-        assert!(output.contains("Remaining results: 3"));
-        assert!(output.ends_with("Search execution time: 2ms"));
+    #[test]
+    fn search_output_replaces_tsv_record_separators_inside_fields() {
+        let output = format_search_results_tsv(&[RfcSearchResult {
+            url: "https://example.com/a\tb".to_string(),
+            title: "A title\r\nwith lines".to_string(),
+            score: 0,
+        }]);
+        assert_eq!(
+            output,
+            "url\ttitle\tscore\nhttps://example.com/a b\tA title  with lines\t0"
+        );
+    }
+
+    #[test]
+    fn empty_search_output_is_a_header_only() {
+        assert_eq!(format_search_results_tsv(&[]), "url\ttitle\tscore");
     }
 
     #[test]
@@ -140,5 +193,21 @@ mod tests {
         assert_eq!(format_score(1_500_000_000), "1.5");
         assert_eq!(format_score(-1), "-0.000000001");
         assert_eq!(format_score(0), "0");
+    }
+
+    #[test]
+    fn score_parser_uses_the_stored_score_scale() {
+        assert_eq!(parse_score("0").unwrap(), 0);
+        assert_eq!(parse_score(".5").unwrap(), 500_000_000);
+        assert_eq!(parse_score("-0.000000001").unwrap(), -1);
+        assert_eq!(parse_score("2.147483647").unwrap(), i32::MAX);
+        assert_eq!(parse_score("-2.147483648").unwrap(), i32::MIN);
+    }
+
+    #[test]
+    fn score_parser_rejects_invalid_or_unrepresentable_values() {
+        for input in ["", ".", "1.0000000000", "nan", "2.147483648"] {
+            assert!(parse_score(input).is_err(), "accepted {input:?}");
+        }
     }
 }

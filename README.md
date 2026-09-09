@@ -29,9 +29,26 @@ Use Up/Down (or k/j) to navigate, Home/End to jump, and Enter to open the select
 in your default browser. Esc, q, or Ctrl-C dismisses the picker. The picker clears itself when it exits.
 It uses the normal terminal screen and may scroll earlier output upward to make room.
 
-Use `rfsee search --terms HTTP --plain` for the original text output. Redirecting or
-piping output, or redirecting input, also selects plain output automatically. Empty
-searches print the normal zero-result summary without opening the picker.
+Use `rfsee search --terms HTTP --plain` for tab-separated output with `url`, `title`,
+and `score` columns. Redirecting or piping output, or redirecting input, also selects
+TSV automatically. Plain output contains every result; an empty search prints only
+the header row.
+
+Use `--min-score` to show only results strictly above a score threshold. The value uses
+the same decimal scale as the displayed `score` column:
+
+```bash
+rfsee search --terms HTTP --min-score 0.001
+```
+
+To apply the threshold to every search, create `~/.config/rfsee/config.toml`:
+
+```toml
+min_score = 0.001
+```
+
+The `--min-score` flag overrides the config file. The default is `0.001` when neither
+sets it. Use `--config PATH` to load a different config file.
 
 Logging is controlled with repeatable `-v` flags. Logs are written to standard error so search
 results can still be piped to another program.
